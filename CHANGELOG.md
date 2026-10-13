@@ -1,5 +1,13 @@
 # Changelog
 
+## [2.31.1](https://github.com/mogenius/mogenius-operator/compare/v2.31.0...v2.31.1) (2026-10-13)
+
+
+### Bug Fixes
+
+* **platformconfig:** clear agent-sandboxes Argo OutOfSync via ignoreDifferences ([53a3618](https://github.com/mogenius/mogenius-operator/commit/53a3618e62a380bd2e69d91d949dd081fd162edd))
+* **platformconfig:** clear agent-sandboxes Argo OutOfSync via ignoreDifferences ([df8e904](https://github.com/mogenius/mogenius-operator/commit/df8e90486ec497486e54ea25a83f35b0b1ea2743))
+
 ## [2.31.0](https://github.com/mogenius/mogenius-operator/compare/v2.30.0...v2.31.0) (2026-10-12)
 
 
