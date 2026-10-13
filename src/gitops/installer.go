@@ -41,6 +41,12 @@ type GitOpsArtifact struct {
 
 type ArgoCDSettings struct {
 	Project string
+	// IgnoreDifferences, when non-empty, is written to the Application's
+	// spec.ignoreDifferences (Argo's own schema: group/kind + jsonPointers or
+	// managedFieldsManagers). It pairs with RespectIgnoreDifferences=true so a
+	// field a controller owns — not Argo — stops driving a permanent OutOfSync
+	// and an endless selfHeal loop.
+	IgnoreDifferences []any
 }
 
 type FluxCDSettings struct {

@@ -73,6 +73,40 @@ func buildArgoApplication(component string, artifact GitOpsArtifact, namespace s
 		helm["valuesObject"] = artifact.Values
 	}
 
+	syncOptions := []any{"CreateNamespace=true", "ServerSideApply=true"}
+
+	spec := map[string]any{
+		"revisionHistoryLimit": 1,
+		"project":              getArgoProject(artifact),
+		"source": map[string]any{
+			"repoURL":        artifact.HelmChart.Repository,
+			"chart":          artifact.HelmChart.Chart,
+			"targetRevision": artifact.HelmChart.Version,
+			"helm":           helm,
+		},
+		"destination": map[string]any{
+			"name":      "in-cluster",
+			"namespace": artifact.Namespace,
+		},
+	}
+
+	// A component whose controller writes back a field Argo never sends (e.g. the
+	// agent-sandbox controller stamping a ref-hash label on its SandboxTemplate)
+	// otherwise sits Healthy but permanently OutOfSync, selfHealing forever.
+	// Ignoring those fields and respecting the ignore during sync clears it.
+	if artifact.ArgoCD != nil && len(artifact.ArgoCD.IgnoreDifferences) > 0 {
+		spec["ignoreDifferences"] = artifact.ArgoCD.IgnoreDifferences
+		syncOptions = append(syncOptions, "RespectIgnoreDifferences=true")
+	}
+
+	spec["syncPolicy"] = map[string]any{
+		"automated": map[string]any{
+			"prune":    true,
+			"selfHeal": true,
+		},
+		"syncOptions": syncOptions,
+	}
+
 	return &unstructured.Unstructured{
 		Object: map[string]any{
 			"apiVersion": "argoproj.io/v1alpha1",
@@ -83,27 +117,7 @@ func buildArgoApplication(component string, artifact GitOpsArtifact, namespace s
 				"labels":     defaultLabels(component),
 				"finalizers": []any{"resources-finalizer.argocd.argoproj.io"}, // ensure resources are deleted when app is deleted
 			},
-			"spec": map[string]any{
-				"revisionHistoryLimit": 1,
-				"project":              getArgoProject(artifact),
-				"source": map[string]any{
-					"repoURL":        artifact.HelmChart.Repository,
-					"chart":          artifact.HelmChart.Chart,
-					"targetRevision": artifact.HelmChart.Version,
-					"helm":           helm,
-				},
-				"destination": map[string]any{
-					"name":      "in-cluster",
-					"namespace": artifact.Namespace,
-				},
-				"syncPolicy": map[string]any{
-					"automated": map[string]any{
-						"prune":    true,
-						"selfHeal": true,
-					},
-					"syncOptions": []any{"CreateNamespace=true", "ServerSideApply=true"},
-				},
-			},
+			"spec": spec,
 		},
 	}
 }
