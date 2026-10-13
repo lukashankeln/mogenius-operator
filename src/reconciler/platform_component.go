@@ -19,6 +19,11 @@ type componentSpec struct {
 	defaultChart     string // default Helm chart name
 	defaultRepo      string // default Helm repository URL
 	defaultName      string // default Helm release name
+	// argoIgnoreDifferences, when set, is written to the component's Argo CD
+	// Application (spec.ignoreDifferences + RespectIgnoreDifferences). Use it for
+	// a component whose controller writes back a field Argo never sends, which
+	// would otherwise pin the Application at Healthy/OutOfSync. Ignored on Flux.
+	argoIgnoreDifferences []any
 }
 
 // reconcileComponent runs the shared reconcile flow for a platform component.
@@ -129,6 +134,9 @@ func (d *reconcilerModule) buildComponentArtifact(
 	extraObjects = append(extraObjects, extraPatchObjects...)
 
 	argoConfig, fluxConfig := getSpecificGitOpsConfig(platformSpec.GitOps)
+	if argoConfig != nil && len(cs.argoIgnoreDifferences) > 0 {
+		argoConfig.IgnoreDifferences = cs.argoIgnoreDifferences
+	}
 
 	return gitops.GitOpsArtifact{
 		Namespace:    helmNamespace(cs.chart, cs.defaultNamespace),

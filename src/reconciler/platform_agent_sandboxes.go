@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 	"mogenius-operator/src/crds/v1alpha1"
-	"net"
 	"mogenius-operator/src/gitops"
+	"net"
 )
 
 // reconcileAgentSandboxes installs the mogenius agent-sandbox stack as a
@@ -34,6 +34,19 @@ func (d *reconcilerModule) reconcileAgentSandboxes(ctx context.Context, spec v1a
 			defaultRepo:      "https://helm.mogenius.com/public",
 			defaultName:      "agent-sandbox",
 			defaultNamespace: "agent-sandbox-system",
+			// The agent-sandbox controller stamps a content-hash label on the
+			// SandboxTemplate after Argo applies it. Argo never sends that label,
+			// so the Application sits Healthy/OutOfSync and selfHeals forever
+			// (MOG-4827). Ignore the controller-owned label; the rest still syncs.
+			argoIgnoreDifferences: []any{
+				map[string]any{
+					"group": "extensions.agents.x-k8s.io",
+					"kind":  "SandboxTemplate",
+					"jsonPointers": []any{
+						"/metadata/labels/agents.x-k8s.io~1sandbox-template-ref-hash",
+					},
+				},
+			},
 		},
 		func(ctx context.Context) ([]any, error) {
 			return []any{}, nil
