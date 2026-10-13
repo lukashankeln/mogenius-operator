@@ -226,23 +226,14 @@ if [ "$__mo_timeout" -gt 0 ] 2>/dev/null && command -v timeout >/dev/null 2>&1; 
 fi
 eval "$__mo_cmd"`
 
-// streamPrelude runs ahead of runScript when the command is streamed. The
-// exec API has no signal to send a non-TTY process once its stream is gone,
-// so the wrapper watches its own stdin instead: the operator keeps that pipe
-// open for as long as the client is connected and closes it when the client
-// goes away or the command has ended. The watchdog subshell then kills the
-// wrapper's whole process tree, children first, by walking /proc — present
-// in every Linux container, where `pkill` or `setsid` are not. Each process
-// is stopped before its children are visited, so a shell cannot run on to
-// its next command while its child dies under it; a stopped process still
-// dies of KILL. The command itself gets /dev/null as stdin, so it neither
-// competes with the watchdog for the pipe nor blocks on input nobody sends.
-// The subshell writes to /dev/null so the exec's output streams close with
-// the command, not with the watchdog. Without job control a shell gives a
-// background list /dev/null as stdin, hence the explicit copy of fd 0 the
-// subshell reads instead. `local` is not POSIX but every shell DetectShell
-// can pick (bash, dash, ash) has it.
-const streamPrelude = `__mo_kill_tree() {
+// killTreeFunc defines __mo_kill_tree, which kills a process and all its
+// descendants, children first, by walking /proc — present in every Linux
+// container, where `pkill` or `setsid` are not. Each process is stopped
+// before its children are visited, so a shell cannot run on to its next
+// command while its child dies under it; a stopped process still dies of
+// KILL. The caller sets __mo_self to its own pid, which is skipped. `local`
+// is not POSIX but every shell DetectShell can pick (bash, dash, ash) has it.
+const killTreeFunc = `__mo_kill_tree() {
   local __mo_root=$1 __mo_p __mo_stat
   kill -STOP "$__mo_root" 2>/dev/null
   for __mo_p in /proc/[0-9]*; do
@@ -254,10 +245,79 @@ const streamPrelude = `__mo_kill_tree() {
   done
   kill -KILL "$__mo_root" 2>/dev/null
 }
-exec 3<&0
+`
+
+// streamPrelude runs ahead of runScript when the command is streamed. The
+// exec API has no signal to send a non-TTY process once its stream is gone,
+// so the wrapper watches its own stdin instead: the operator keeps that pipe
+// open for as long as the client is connected and closes it when the client
+// goes away or the command has ended. The watchdog subshell then kills the
+// wrapper's whole process tree (killTreeFunc). The command itself gets
+// /dev/null as stdin, so it neither competes with the watchdog for the pipe
+// nor blocks on input nobody sends. The subshell writes to /dev/null so the
+// exec's output streams close with the command, not with the watchdog.
+// Without job control a shell gives a background list /dev/null as stdin,
+// hence the explicit copy of fd 0 the subshell reads instead.
+const streamPrelude = killTreeFunc + `exec 3<&0
 ( exec 3<&-; read -r __mo_self _ < /proc/self/stat; cat >/dev/null 2>&1; __mo_kill_tree $$ ) <&3 >/dev/null 2>&1 &
 exec 3<&- </dev/null
 `
+
+// sessionScript starts the long-lived shell of a command session (see
+// services/sessions.go), which reads its commands from stdin. Positional
+// inputs are KEY=VALUE pairs exported first, so the values travel in the
+// exec's argv like a command's environment and never as a command the
+// session records. The shell cannot watch its own stdin while a command
+// runs, so the left side of the pipeline relays stdin to it and, once the
+// operator closes stdin (session deleted, stream gone, operator restarted),
+// kills the wrapper's whole tree, the running command included. The right
+// side runs the shell; when the shell ends on its own (`exit 3` in a
+// command) it kills the relay, its only sibling, so the wrapper ends with
+// the shell's status. The wrapper's own stderr goes to /dev/null, so its
+// note about the killed relay ("Killed") does not end up in a command's
+// output; the shell gets the exec's stderr back on fd 4. An image without
+// `cat` gets the bare shell, whose running command then outlives a deleted
+// session.
+const sessionScript = killTreeFunc + `for __mo_kv in "$@"; do export "$__mo_kv"; done
+unset __mo_kv
+command -v cat >/dev/null 2>&1 || exec "$0"
+exec 4>&2 2>/dev/null
+{ cat; read -r __mo_self _ < /proc/self/stat; __mo_kill_tree $$; } 4>&- | {
+  "$0" 2>&4 4>&-
+  __mo_rc=$?
+  read -r __mo_self _ < /proc/self/stat
+  for __mo_p in /proc/[0-9]*; do
+    __mo_p=${__mo_p#/proc/}
+    [ "$__mo_p" = "$__mo_self" ] && continue
+    read -r __mo_stat < "/proc/$__mo_p/stat" 2>/dev/null || continue
+    set -- ${__mo_stat##*) }
+    [ "$2" = "$$" ] && __mo_kill_tree "$__mo_p"
+  done
+  exit $__mo_rc
+}`
+
+// terminalScript starts the shell of a terminal session with the exported
+// KEY=VALUE pairs given as positional inputs. The shell replaces the
+// wrapper, so it is interactive on the TTY as if started directly.
+const terminalScript = `for __mo_kv in "$@"; do export "$__mo_kv"; done
+unset __mo_kv
+exec "$0"`
+
+// BuildSessionShellCommand is the argv of a command session's shell: env
+// exported, and the running command stopped when the session's stdin
+// closes (see sessionScript). Callers validate env with ValidateEnv first.
+func BuildSessionShellCommand(shell string, env map[string]string) []string {
+	return append([]string{shell, "-c", sessionScript, shell}, envPairs(env)...)
+}
+
+// BuildTerminalShellCommand is the argv of a terminal session's shell. A
+// TTY hangs the shell up when its stream ends, so only env needs a wrapper.
+func BuildTerminalShellCommand(shell string, env map[string]string) []string {
+	if len(env) == 0 {
+		return []string{shell}
+	}
+	return append([]string{shell, "-c", terminalScript, shell}, envPairs(env)...)
+}
 
 // BuildShellCommand turns a command line into the argv Run expects: the
 // shell, the wrapper script and the script's positional inputs. env is
@@ -280,16 +340,22 @@ func buildShellCommand(script, shell, command, cwd string, env map[string]string
 		seconds = int(math.Ceil(timeout.Seconds()))
 	}
 	argv := []string{shell, "-c", script, shell, cwd, strconv.Itoa(seconds), command}
+	return append(argv, envPairs(env)...)
+}
 
+// envPairs renders env as KEY=VALUE in sorted key order, so identical
+// requests produce identical argv.
+func envPairs(env map[string]string) []string {
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	pairs := make([]string, 0, len(keys))
 	for _, key := range keys {
-		argv = append(argv, key+"="+env[key])
+		pairs = append(pairs, key+"="+env[key])
 	}
-	return argv
+	return pairs
 }
 
 // TimedOut reports whether a finished Run was ended by its timeout: either

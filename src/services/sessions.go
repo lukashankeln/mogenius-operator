@@ -94,6 +94,11 @@ type SessionCreateRequest struct {
 	// it reports NO_SHELL_AVAILABLE instead, since the container stays on the
 	// pod. Command sessions keep the exec request's rule and fall back.
 	DebugContainer bool `json:"debugContainer"`
+	// Env is exported into the session's shell, so every command sees it.
+	// The values travel once, in the argv that starts the shell, and never
+	// as a command the session records (SessionInfo lists commands only).
+	// Keys must be valid shell variable names.
+	Env map[string]string `json:"env"`
 }
 
 // SessionExecRequest is the payload of `service/session-exec`.
@@ -201,12 +206,12 @@ var (
 	}
 	// The shell's own exit status is returned: an `exit 3` in a command ends
 	// the shell, and that command then reports 3.
-	sessionShellFn = func(ctx context.Context, plan *execPlan, namespace, pod string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+	sessionShellFn = func(ctx context.Context, plan *execPlan, namespace, pod string, env map[string]string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 		return k8sexec.Stream(ctx, plan.clients, k8sexec.RunRequest{
 			Namespace: namespace,
 			Pod:       pod,
 			Container: plan.container,
-			Command:   []string{plan.shell},
+			Command:   k8sexec.BuildSessionShellCommand(plan.shell, env),
 		}, stdin, stdout, stderr)
 	}
 )
@@ -251,6 +256,9 @@ func (r *sessionRegistry) remove(session *podSession) {
 func CreateSession(request SessionCreateRequest) (SessionInfo, error) {
 	if !sessionIdPattern.MatchString(request.SessionId) {
 		return SessionInfo{}, ErrSessionInvalidId
+	}
+	if err := k8sexec.ValidateEnv(request.Env); err != nil {
+		return SessionInfo{}, err
 	}
 	key := sessionKey(request.Namespace, request.Pod, request.SessionId)
 	sessions.mu.Lock()
@@ -308,8 +316,8 @@ func GetSession(request SessionRequest) (SessionInfo, error) {
 }
 
 // DeleteSession ends the session and forgets it: its shell loses stdin and
-// the exec stream, which ends the shell once the running command, if any,
-// has returned.
+// the exec stream, and the wrapper the shell runs in kills it together with
+// the running command and that command's children.
 func DeleteSession(request SessionRequest) error {
 	session, err := sessions.get(request)
 	if err != nil {
@@ -523,7 +531,7 @@ func startSession(request SessionCreateRequest, key string) (*podSession, error)
 	}
 	go func() {
 		defer close(session.done)
-		exitCode, err := sessionShellFn(ctx, plan, request.Namespace, request.Pod, stdinReader, &sessionStdout{session: session}, &sessionStderr{session: session})
+		exitCode, err := sessionShellFn(ctx, plan, request.Namespace, request.Pod, request.Env, stdinReader, &sessionStdout{session: session}, &sessionStderr{session: session})
 		if err != nil {
 			if ctx.Err() == nil {
 				serviceLogger.Info("session shell ended", "namespace", request.Namespace, "pod", request.Pod, "sessionId", request.SessionId, "error", err)

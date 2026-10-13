@@ -31,12 +31,12 @@ var ErrSessionNotTerminal = errors.New("not a terminal session")
 
 // sessionTTYShellFn starts a terminal session's shell; tests replace it
 // with a local pty.
-var sessionTTYShellFn = func(ctx context.Context, plan *execPlan, namespace, pod string, stdin io.Reader, output io.Writer, sizes remotecommand.TerminalSizeQueue) (int, error) {
+var sessionTTYShellFn = func(ctx context.Context, plan *execPlan, namespace, pod string, env map[string]string, stdin io.Reader, output io.Writer, sizes remotecommand.TerminalSizeQueue) (int, error) {
 	return k8sexec.StreamTTY(ctx, plan.clients, k8sexec.RunRequest{
 		Namespace: namespace,
 		Pod:       pod,
 		Container: plan.container,
-		Command:   []string{plan.shell},
+		Command:   k8sexec.BuildTerminalShellCommand(plan.shell, env),
 	}, stdin, output, sizes)
 }
 
@@ -259,7 +259,7 @@ func startTerminalSession(request SessionCreateRequest, key string, plan *execPl
 	session.pty.sizes.set(remotecommand.TerminalSize{Width: 80, Height: 24})
 	go func() {
 		defer close(session.done)
-		exitCode, err := sessionTTYShellFn(ctx, plan, request.Namespace, request.Pod, stdinReader, &sessionPTYOutput{session: session}, session.pty.sizes)
+		exitCode, err := sessionTTYShellFn(ctx, plan, request.Namespace, request.Pod, request.Env, stdinReader, &sessionPTYOutput{session: session}, session.pty.sizes)
 		if err != nil {
 			if ctx.Err() == nil {
 				serviceLogger.Info("terminal session shell ended", "namespace", request.Namespace, "pod", request.Pod, "sessionId", request.SessionId, "error", err)

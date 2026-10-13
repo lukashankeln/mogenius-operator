@@ -16,6 +16,8 @@ pip install matplotlib
 1. Export the ENV variable `MO_ENABLE_PATTERNLOGGING` with any value.
 2. Start the operator with `just run`. Use the platform website and navigate around to trigger patterns. `patternlogs.jsonl` will contain all calls to patterns in the patternhandler.
 
+The file holds every payload unredacted, including secrets a request carries (the `env` of exec and session requests). Use it on a local operator only and delete it afterwards.
+
 ## Generate Summary
 
 Run `tools/patternbench/main.go` from the Git repositories root.

@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"mogenius-operator/src/secrets"
 	"mogenius-operator/src/structs"
 
 	"github.com/stretchr/testify/assert"
@@ -107,6 +108,30 @@ func TestSanitizeAuditLogEntryRedactsAiModelApiKey(t *testing.T) {
 	assert.NotContains(t, payload["apiKey"], "sk-ant-live-abc123")
 	assert.Contains(t, payload["apiKey"], "REDACTED")
 	assert.Equal(t, "claude", payload["name"])
+}
+
+func TestSanitizeAuditLogEntryRedactsEnvironments(t *testing.T) {
+	for _, pattern := range []string{"service/exec-request", "service/exec-stream-connection-request", "service/session-create"} {
+		entry := AuditLogEntry{
+			Pattern: pattern,
+			Payload: map[string]any{
+				"namespace": "agents",
+				"pod":       "sandbox-1",
+				"command":   "claude -p",
+				"env":       map[string]any{"ANTHROPIC_API_KEY": "sk-ant-made-up-1", "ADMIN_USER_PWD": "made-up-pwd"},
+			},
+		}
+
+		sanitizeAuditLogEntry(&entry)
+
+		payload := entry.Payload.(map[string]any)
+		env := payload["env"].(map[string]any)
+		assert.Len(t, env, 2, pattern)
+		for name, value := range env {
+			assert.Equal(t, secrets.REDACTED, value, "%s: value of %q", pattern, name)
+		}
+		assert.Equal(t, "claude -p", payload["command"], pattern)
+	}
 }
 
 func TestSanitizeAuditLogEntryLeavesNonSecretPayloadUntouched(t *testing.T) {

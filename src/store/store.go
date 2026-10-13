@@ -2017,8 +2017,10 @@ func sanitizeAuditLogEntry(entry *AuditLogEntry) {
 
 // sensitiveAuditPayloadKeys are payload field names whose values are
 // credentials by construction (e.g. helm repo add/patch requests carry a
-// repo password). Matched case-insensitively against map keys.
+// repo password, exec and session requests an environment of API keys).
+// Matched case-insensitively against map keys.
 var sensitiveAuditPayloadKeys = map[string]struct{}{
+	"env":           {},
 	"password":      {},
 	"token":         {},
 	"apikey":        {},
@@ -2030,16 +2032,28 @@ var sensitiveAuditPayloadKeys = map[string]struct{}{
 }
 
 // redactSensitiveKeys walks JSON-decoded payload structures and replaces
-// values of credential-carrying keys. Maps are copied, never mutated in
-// place (the datagram payload may still be referenced elsewhere).
+// values of credential-carrying keys. Under such a key a string is replaced,
+// and a map (an environment) keeps its names with every value replaced.
+// Maps are copied, never mutated in place (the datagram payload may still
+// be referenced elsewhere).
 func redactSensitiveKeys(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		copied := make(map[string]any, len(typed))
 		for k, v := range typed {
 			if _, sensitive := sensitiveAuditPayloadKeys[strings.ToLower(k)]; sensitive {
-				if str, ok := v.(string); ok && str != "" {
-					copied[k] = secrets.REDACTED
+				switch secret := v.(type) {
+				case string:
+					if secret != "" {
+						copied[k] = secrets.REDACTED
+						continue
+					}
+				case map[string]any:
+					names := make(map[string]any, len(secret))
+					for name := range secret {
+						names[name] = secrets.REDACTED
+					}
+					copied[k] = names
 					continue
 				}
 			}

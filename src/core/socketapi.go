@@ -352,7 +352,8 @@ func registerPatternHandlerInternal[RequestType any, ResponseType any](
 		if kind != reflect.Pointer {
 			err := handle.SocketApi.LoadRequest(&datagram, &data)
 			if err != nil {
-				handle.SocketApi.GetLogger().Error("Error while loading request", "datagram", datagram, "error", err)
+				// not the datagram itself: its payload may carry an environment of secrets
+				handle.SocketApi.GetLogger().Error("Error while loading request", "pattern", datagram.Pattern, "requestId", datagram.Id, "error", err)
 				return buildResponse(nil, err)
 			}
 		}
@@ -360,7 +361,8 @@ func registerPatternHandlerInternal[RequestType any, ResponseType any](
 		if kind == reflect.Pointer && datagram.Payload != nil {
 			err := handle.SocketApi.LoadRequest(&datagram, &data)
 			if err != nil {
-				handle.SocketApi.GetLogger().Error("Error while loading request", "datagram", datagram, "error", err)
+				// not the datagram itself: its payload may carry an environment of secrets
+				handle.SocketApi.GetLogger().Error("Error while loading request", "pattern", datagram.Pattern, "requestId", datagram.Id, "error", err)
 				return buildResponse(nil, err)
 			}
 		}

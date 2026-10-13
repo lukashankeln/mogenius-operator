@@ -127,6 +127,7 @@ if [[ -f .env ]]; then export $(grep -v '^#' .env | xargs); fi
 | `MO_ALLOW_COUNTRY_CHECK` | `true` | Allow the operator to determine its location country via IP lookup |
 | `MO_PPROF` | `false` | Expose Go pprof profiling endpoints at `/debug/pprof/` (set to `true` for debugging) |
 | `KUBERNETES_DEBUG` | `false` | Enable Kubernetes SDK debug output |
+| `MO_ENABLE_PATTERNLOGGING` | — | Debug only: write every request datagram unredacted to `/tmp/patternlogs.jsonl` (see `tools/patternbench`). The file then holds request secrets too, such as the `env` of exec and session requests |
 
 List all config options at runtime: `go run -trimpath src/main.go config`
 

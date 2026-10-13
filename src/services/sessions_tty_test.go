@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"mogenius-operator/src/k8sexec"
+
 	"github.com/creack/pty"
 	"k8s.io/client-go/tools/remotecommand"
 )
@@ -24,8 +26,9 @@ func useLocalPty(t *testing.T) {
 	old := sessionTTYShellFn
 	t.Cleanup(func() { sessionTTYShellFn = old })
 	useLocalShell(t)
-	sessionTTYShellFn = func(ctx context.Context, plan *execPlan, _, _ string, stdin io.Reader, output io.Writer, sizes remotecommand.TerminalSizeQueue) (int, error) {
-		cmd := exec.CommandContext(ctx, plan.shell)
+	sessionTTYShellFn = func(ctx context.Context, plan *execPlan, _, _ string, env map[string]string, stdin io.Reader, output io.Writer, sizes remotecommand.TerminalSizeQueue) (int, error) {
+		argv := k8sexec.BuildTerminalShellCommand(plan.shell, env)
+		cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
 		cmd.Env = []string{"PS1=$ ", "TERM=xterm", "PATH=/usr/bin:/bin"}
 		f, err := pty.Start(cmd)
 		if err != nil {

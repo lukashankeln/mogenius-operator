@@ -3,13 +3,20 @@ package services
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"mogenius-operator/src/k8sexec"
 )
 
 // localShell is dash where there is one, else `sh`: dash is stricter than
@@ -31,8 +38,13 @@ func useLocalShell(t *testing.T) {
 	sessionTargetFn = func(context.Context, SessionCreateRequest) (*execPlan, error) {
 		return &execPlan{shell: localShell(), container: "sandbox", targetContainer: "sandbox", maxOutput: 1 << 20}, nil
 	}
-	sessionShellFn = func(ctx context.Context, plan *execPlan, _, _ string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-		cmd := exec.CommandContext(ctx, plan.shell)
+	sessionShellFn = func(ctx context.Context, plan *execPlan, _, _ string, env map[string]string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+		argv := k8sexec.BuildSessionShellCommand(plan.shell, env)
+		if runtime.GOOS != "linux" {
+			// the wrapper's watchdog walks /proc; elsewhere only env is wrapped
+			argv = k8sexec.BuildTerminalShellCommand(plan.shell, env)
+		}
+		cmd := exec.Command(argv[0], argv[1:]...)
 		// Not cmd.Stdin: Wait would then also wait for the stdin copy, which
 		// only ends when the session closes its pipe — the exec API returns
 		// as soon as the process is gone, and so must this.
@@ -46,7 +58,22 @@ func useLocalShell(t *testing.T) {
 		}()
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
-		err = cmd.Run()
+		if err := cmd.Start(); err != nil {
+			return 0, err
+		}
+		waited := make(chan error, 1)
+		go func() { waited <- cmd.Wait() }()
+		select {
+		case err = <-waited:
+		case <-ctx.Done():
+			// The exec API closes the container's stdin and lets go; stopping
+			// the process is the wrapper's job, as in the container.
+			_ = pipe.Close()
+			if runtime.GOOS != "linux" {
+				_ = cmd.Process.Kill()
+			}
+			return 0, ctx.Err()
+		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
 			if exitErr.ExitCode() < 0 {
@@ -331,6 +358,125 @@ func TestSessionDeleteEndsTheShellAndTheRunningCommand(t *testing.T) {
 	if _, err := ExecSessionCommand(context.Background(), SessionExecRequest{SessionRequest: ref, Command: "true"}); err != ErrSessionNotFound {
 		t.Errorf("exec after delete = %v", err)
 	}
+}
+
+// Env reaches every command of the session but is never part of what the
+// session reports about itself.
+func TestSessionEnvReachesCommandsButNotInfo(t *testing.T) {
+	useLocalShell(t)
+	ref := sessionRef("env")
+	const value = "made-up-value-4711 with 'quotes' and $dollar"
+	if _, err := CreateSession(SessionCreateRequest{SessionRequest: ref, Env: map[string]string{"MO_TEST_SECRET": value}}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	response := execSync(t, ref, `printf '%s\n' "$MO_TEST_SECRET"`)
+	if deref(response.Output) != value+"\n" {
+		t.Fatalf("output = %q, want the value", deref(response.Output))
+	}
+	info, err := GetSession(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	serialized, _ := json.Marshal(info)
+	if strings.Contains(string(serialized), "made-up-value-4711") {
+		t.Errorf("session info carries the value: %s", serialized)
+	}
+}
+
+func TestSessionCreateRejectsInvalidEnv(t *testing.T) {
+	useLocalShell(t)
+	for _, name := range []string{"1X", "A=B", "", "A B"} {
+		ref := sessionRef("badenv")
+		if _, err := CreateSession(SessionCreateRequest{SessionRequest: ref, Env: map[string]string{name: "x"}}); err == nil {
+			t.Errorf("env name %q accepted", name)
+			_ = DeleteSession(ref)
+		}
+	}
+}
+
+// Deleting a session stops what it runs, children included — a long agent
+// run must not outlive a cancelled test.
+func TestSessionDeleteKillsTheCommandTree(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the watchdog walks /proc")
+	}
+	useLocalShell(t)
+	ref := createTestSession(t, "killtree")
+	pids := filepath.Join(t.TempDir(), "pids")
+	command := "sleep 300 & echo $! > " + pids + "; (sleep 300 & echo $! >> " + pids + "; wait) & wait"
+	if _, err := ExecSessionCommand(context.Background(), SessionExecRequest{SessionRequest: ref, Command: command, RunAsync: true}); err != nil {
+		t.Fatal(err)
+	}
+	var children []int
+	for deadline := time.Now().Add(5 * time.Second); len(children) < 2; time.Sleep(50 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("children did not start: %v", children)
+		}
+		data, _ := os.ReadFile(pids)
+		children = children[:0]
+		for _, field := range strings.Fields(string(data)) {
+			if pid, err := strconv.Atoi(field); err == nil {
+				children = append(children, pid)
+			}
+		}
+	}
+	session, err := sessions.get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := DeleteSession(ref); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-session.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the shell did not end after delete")
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		alive := []int{}
+		for _, pid := range children {
+			if processAlive(pid) {
+				alive = append(alive, pid)
+			}
+		}
+		if len(alive) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("still running after delete: %v", alive)
+		}
+	}
+}
+
+// A shell that ends on its own still reports its status through the
+// wrapper, and does not wait for the session's stdin to close.
+func TestSessionExitEndsTheSessionWithItsStatus(t *testing.T) {
+	useLocalShell(t)
+	ref := createTestSession(t, "exit")
+	session, err := sessions.get(ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := execSync(t, ref, "exit 3")
+	if response.ExitCode == nil || *response.ExitCode != 3 {
+		t.Fatalf("exit = %v, want 3", response.ExitCode)
+	}
+	select {
+	case <-session.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the session did not end with its shell")
+	}
+}
+
+// processAlive treats a zombie as gone: it is dead, just not yet reaped by
+// whoever inherited it.
+func processAlive(pid int) bool {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	fields := strings.Fields(string(data[strings.LastIndexByte(string(data), ')')+1:]))
+	return len(fields) > 0 && fields[0] != "Z"
 }
 
 func TestSessionIdleSweep(t *testing.T) {
