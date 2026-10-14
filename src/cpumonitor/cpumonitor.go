@@ -247,7 +247,7 @@ type CpuMetrics struct {
 
 func (self *cpuMonitor) collectProcessMetrics() map[containerenumerator.ContainerId][]ProcPidStat {
 	data := map[containerenumerator.ContainerId][]ProcPidStat{}
-	containers := self.containerEnumerator.GetProcessesWithContainerIds()
+	containers := containerenumerator.PodProcesses(self.containerEnumerator.GetPodsWithContainerIds())
 
 	for containerId, pids := range containers {
 		infos := []ProcPidStat{}
