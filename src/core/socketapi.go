@@ -3654,7 +3654,7 @@ func (self *socketApi) execStreamConnection(request services.ExecStreamRequest) 
 // sessionLogStreamConnection follows one session command over a stream
 // socket with the exec stream's frames (MOG-4692): the buffered output
 // first, then live until the command ends. The buffer is capped already, so
-// the stream's own cap is off.
+// the stream's own cap is off; the outcome tells whether the buffer's was hit.
 func (self *socketApi) sessionLogStreamConnection(request services.SessionLogStreamRequest) {
 	stream.ExecStream(
 		stream.ExecStreamRequest{

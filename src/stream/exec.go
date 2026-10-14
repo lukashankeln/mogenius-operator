@@ -17,7 +17,7 @@ import (
 //
 //	operator → client:  [0]<bytes>       a chunk of stdout
 //	                    [1]<bytes>       a chunk of stderr
-//	                    TRUNCATED        a stream hit the output cap; the rest was dropped
+//	                    TRUNCATED        the output hit a cap; the rest was dropped
 //	                    TIMEOUT          the command was stopped at its deadline
 //	                    EXIT:<code>      the command ended; the socket closes after this
 //	                    ERROR:<message>  the command could not run at all
@@ -54,6 +54,9 @@ type ExecStreamOutcome struct {
 	// TimedOut: the command was stopped at its deadline; ExitCode is then
 	// what the kill left behind.
 	TimedOut bool
+	// Truncated: output was dropped before it reached the writers (a
+	// session command's buffer is capped where it is filled).
+	Truncated bool
 }
 
 // ExecStream connects to the stream gateway and runs `run` with a stdin pipe
@@ -118,13 +121,9 @@ func ExecStream(
 		streamLogger.Error("[ExecStream] command could not run", "channelId", request.WsConnection.ChannelId, "error", runErr)
 		_ = send(websocket.TextMessage, []byte(execErrorPrefix+runErr.Error()))
 	default:
-		if stdout.truncated || stderr.truncated {
-			_ = send(websocket.TextMessage, []byte(execTruncatedFrame))
+		for _, frame := range execClosingFrames(outcome, stdout.truncated || stderr.truncated) {
+			_ = send(websocket.TextMessage, []byte(frame))
 		}
-		if outcome.TimedOut {
-			_ = send(websocket.TextMessage, []byte(execTimeoutFrame))
-		}
-		_ = send(websocket.TextMessage, []byte(execExitPrefix+strconv.Itoa(outcome.ExitCode)))
 	}
 	// Same close as a terminal: the relay closes the client with 1000 on this
 	// reason. Wait for the gateway's answer before tearing the socket down so
@@ -136,6 +135,19 @@ func ExecStream(
 		streamLogger.Warn("[ExecStream] gateway did not answer the close in time", "channelId", request.WsConnection.ChannelId)
 	}
 	_ = conn.Close()
+}
+
+// execClosingFrames are the text frames that end a command's stream, the
+// exit last.
+func execClosingFrames(outcome ExecStreamOutcome, writersTruncated bool) []string {
+	var frames []string
+	if writersTruncated || outcome.Truncated {
+		frames = append(frames, execTruncatedFrame)
+	}
+	if outcome.TimedOut {
+		frames = append(frames, execTimeoutFrame)
+	}
+	return append(frames, execExitPrefix+strconv.Itoa(outcome.ExitCode))
 }
 
 // taggedWriter frames one output stream: every Write becomes one binary frame

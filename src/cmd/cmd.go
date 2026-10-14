@@ -449,9 +449,16 @@ func LoadConfigDeclarations(configModule *config.Config) {
 		Type:         new(config.ConfigVariableTypeInt),
 	})
 	configModule.Declare(config.ConfigDeclaration{
+		Key:          "MO_SESSION_COMMAND_MAX_OUTPUT_BYTES",
+		DefaultValue: new("16777216"),
+		Description:  new("How much output a pod session command keeps, stdout and stderr together, in bytes; 0 keeps all of it. Past the cap the rest is dropped while the command runs on, and the command is marked truncated. The kept output stays in memory until the session ends."),
+		Envs:         []string{"SESSION_COMMAND_MAX_OUTPUT_BYTES"},
+		Type:         new(config.ConfigVariableTypeInt),
+	})
+	configModule.Declare(config.ConfigDeclaration{
 		Key:          "MO_EXEC_REQUEST_MAX_OUTPUT_BYTES",
 		DefaultValue: new("1048576"),
-		Description:  new("Cap per output stream (stdout and stderr each) of a service/exec-request, in bytes. Longer output is cut and the response is marked truncated."),
+		Description:  new("Cap per output stream (stdout and stderr each) of a service/exec-request and an exec stream, in bytes. Longer output is cut and the response is marked truncated. Session commands have their own cap, MO_SESSION_COMMAND_MAX_OUTPUT_BYTES."),
 		Envs:         []string{"EXEC_REQUEST_MAX_OUTPUT_BYTES"},
 		Type:         new(config.ConfigVariableTypeInt),
 	})

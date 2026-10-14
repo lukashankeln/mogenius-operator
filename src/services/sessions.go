@@ -32,6 +32,10 @@ const (
 	SessionConfigKeyIdleTimeout = "MO_SESSION_IDLE_TIMEOUT_SECONDS"
 	sessionDefaultIdleTimeout   = 30 * time.Minute
 	sessionJanitorInterval      = time.Minute
+	// SessionConfigKeyMaxOutput caps the output a session command keeps,
+	// stdout and stderr together; 0 keeps all of it.
+	SessionConfigKeyMaxOutput = "MO_SESSION_COMMAND_MAX_OUTPUT_BYTES"
+	sessionDefaultMaxOutput   = 16 << 20
 	// sessionDefaultWait is how long a synchronous exec waits for its command
 	// when the request names no timeout.
 	sessionDefaultWait = 60 * time.Second
@@ -156,6 +160,9 @@ type SessionCommandInfo struct {
 	ExitCode   *int       `json:"exitCode"`
 	StartedAt  time.Time  `json:"startedAt"`
 	FinishedAt *time.Time `json:"finishedAt"`
+	// Truncated: the command printed more than the session's output cap,
+	// and what came after it was dropped.
+	Truncated bool `json:"truncated"`
 }
 
 // SessionExecResponse answers a session exec. ExitCode is nil for a
@@ -202,7 +209,7 @@ var (
 		if err != nil {
 			return nil, fmt.Errorf("session: %w", err)
 		}
-		return &execPlan{clients: clients, shell: shell, container: container, targetContainer: targetContainer, cwd: cwd, maxOutput: ExecOutputCap()}, nil
+		return &execPlan{clients: clients, shell: shell, container: container, targetContainer: targetContainer, cwd: cwd, maxOutput: SessionCommandOutputCap()}, nil
 	}
 	// The shell's own exit status is returned: an `exit 3` in a command ends
 	// the shell, and that command then reports 3.
@@ -385,7 +392,7 @@ func SendSessionInput(request SessionInputRequest) error {
 // FollowSessionCommand writes what the command has printed so far to the
 // writers, then everything it prints until it ends or ctx is done. The exit
 // code is the command's; a session that ended under the command reports
-// SessionEndedExitCode.
+// SessionEndedExitCode. Truncated says the output cap dropped the rest.
 func FollowSessionCommand(ctx context.Context, request SessionCommandRequest, stdout, stderr io.Writer) (stream.ExecStreamOutcome, error) {
 	command, err := findSessionCommand(request)
 	if err != nil {
@@ -395,7 +402,7 @@ func FollowSessionCommand(ctx context.Context, request SessionCommandRequest, st
 	if err != nil {
 		return stream.ExecStreamOutcome{}, err
 	}
-	return stream.ExecStreamOutcome{ExitCode: exitCode}, nil
+	return stream.ExecStreamOutcome{ExitCode: exitCode, Truncated: command.info().Truncated}, nil
 }
 
 func findSessionCommand(request SessionCommandRequest) (*sessionCommand, error) {
@@ -414,6 +421,17 @@ func SessionIdleTimeout() time.Duration {
 		}
 	}
 	return sessionDefaultIdleTimeout
+}
+
+// SessionCommandOutputCap is the configured cap on a session command's
+// output, 0 for none, or the default.
+func SessionCommandOutputCap() int {
+	if config != nil {
+		if bytes, err := config.TryGetInt(SessionConfigKeyMaxOutput); err == nil && bytes >= 0 {
+			return int(bytes)
+		}
+	}
+	return sessionDefaultMaxOutput
 }
 
 // RunSessionJanitor closes sessions that have had no running command for
@@ -926,7 +944,9 @@ func (c *sessionCommand) notifyLocked() {
 }
 
 // append keeps the first limit bytes of output and drops the rest, like the
-// exec request's buffers, so the command runs to its end regardless.
+// exec request's buffers, so the command runs to its end regardless. The
+// kept bytes stay put rather than rolling: a client that lost its log
+// stream replays it from the start and skips what it has seen.
 func (c *sessionCommand) append(tag byte, data []byte) {
 	if len(data) == 0 {
 		return
@@ -980,7 +1000,7 @@ func (c *sessionCommand) snapshot(from int) ([]sessionOutputChunk, bool, <-chan 
 func (c *sessionCommand) info() SessionCommandInfo {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return SessionCommandInfo{Id: c.id, Command: c.command, ExitCode: c.exitCode, StartedAt: c.startedAt, FinishedAt: c.finishedAt}
+	return SessionCommandInfo{Id: c.id, Command: c.command, ExitCode: c.exitCode, StartedAt: c.startedAt, FinishedAt: c.finishedAt, Truncated: c.truncated}
 }
 
 func (c *sessionCommand) logs() SessionLogsResponse {

@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	cfg "mogenius-operator/src/config"
 	"mogenius-operator/src/k8sexec"
 )
 
@@ -515,9 +516,55 @@ func TestSessionOutputCapTruncates(t *testing.T) {
 	ref := createTestSession(t, "cap")
 
 	response := execSync(t, ref, "printf 0123456789; echo; echo more")
-	logs, _ := GetSessionCommandLogs(SessionCommandRequest{SessionRequest: ref, CmdId: response.CmdId})
+	request := SessionCommandRequest{SessionRequest: ref, CmdId: response.CmdId}
+	logs, _ := GetSessionCommandLogs(request)
 	if logs.Output != "01234567" || !logs.Truncated || response.ExitCode == nil || *response.ExitCode != 0 {
 		t.Errorf("logs = %+v exit = %v", logs, response.ExitCode)
+	}
+	// the command and its log stream say so too, so a client can tell a cut from a lost connection
+	info, err := GetSessionCommand(request)
+	if err != nil || !info.Truncated {
+		t.Errorf("command info = %+v, %v", info, err)
+	}
+	var followed bytes.Buffer
+	outcome, err := FollowSessionCommand(context.Background(), request, &followed, io.Discard)
+	if err != nil || !outcome.Truncated || outcome.ExitCode != 0 || followed.String() != "01234567" {
+		t.Errorf("follow = %+v %q, %v", outcome, followed.String(), err)
+	}
+
+	short := execSync(t, ref, "echo ok")
+	request = SessionCommandRequest{SessionRequest: ref, CmdId: short.CmdId}
+	info, _ = GetSessionCommand(request)
+	outcome, _ = FollowSessionCommand(context.Background(), request, io.Discard, io.Discard)
+	if info.Truncated || outcome.Truncated {
+		t.Errorf("a command under the cap is marked truncated: %+v %+v", info, outcome)
+	}
+}
+
+// Session commands have their own cap, 16 MiB unless set, 0 for none; the
+// exec request's stays apart.
+func TestSessionCommandOutputCap(t *testing.T) {
+	old := config
+	t.Cleanup(func() { config = old })
+	config = nil
+	if got := SessionCommandOutputCap(); got != 16<<20 {
+		t.Errorf("without config = %d", got)
+	}
+	module := cfg.NewConfig()
+	for _, key := range []string{SessionConfigKeyMaxOutput, ExecRequestConfigKeyMaxOutput} {
+		module.Declare(cfg.ConfigDeclaration{Key: key, Type: new(cfg.ConfigVariableTypeInt)})
+	}
+	module.Set(ExecRequestConfigKeyMaxOutput, "1048576")
+	config = module
+	for value, want := range map[string]int{"0": 0, "1048576": 1 << 20, "-1": 16 << 20} {
+		module.Set(SessionConfigKeyMaxOutput, value)
+		if got := SessionCommandOutputCap(); got != want {
+			t.Errorf("%s → %d, want %d", value, got, want)
+		}
+	}
+	module.Set(SessionConfigKeyMaxOutput, "0")
+	if got := ExecOutputCap(); got != 1<<20 {
+		t.Errorf("exec request cap = %d", got)
 	}
 }
 
