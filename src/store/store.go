@@ -2194,11 +2194,11 @@ func listAuditLogIndexed(limit int, offset int, namespaces []string, clusterWide
 		candidates := make([]candidate, 0, len(members))
 		for _, key := range members {
 			ns := auditKeyNamespace(key)
-			if ns == "" {
-				continue
-			}
 			if clusterWide {
 				candidates = append(candidates, candidate{key: key})
+				continue
+			}
+			if ns == "" {
 				continue
 			}
 			if ns == "ai-chat" {

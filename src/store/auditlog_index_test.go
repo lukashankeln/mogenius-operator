@@ -127,6 +127,39 @@ func TestListAuditLogIndexedNamespaceAndWorkspaceFilter(t *testing.T) {
 	assert.Equal(t, 4, totalAll)
 }
 
+func TestListAuditLogIndexedIncludesClusterScopedResources(t *testing.T) {
+	newIndexTestStore(t)
+	auditLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+	auditLogIndexEnsured.Store(false)
+
+	base := time.Now().Add(-time.Hour)
+	writeTestAuditEntry(t, "prod", "app-a", "update/workload", base)
+	// Cluster-scoped resources (CRDs, ClusterRoles, PVs, ...) carry no
+	// namespace, so their audit key is "audit-log::<name>:<n>" — regression
+	// test for a bug where listAuditLogIndexed dropped every such entry,
+	// even in the cluster-wide view, because it checked for an empty
+	// namespace segment before checking clusterWide.
+	writeTestAuditEntry(t, "", "mycrd.example.com", "delete/workload", base.Add(time.Second))
+
+	entries, total, err := ListAuditLog(10, 0, nil, true, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, 2, total)
+	names := map[string]bool{}
+	for _, e := range entries {
+		names[e.Name] = true
+	}
+	assert.True(t, names["mycrd.example.com"], "cluster-scoped entry must appear in the cluster-wide view")
+
+	// A workspace-scoped view correctly excludes it: a cluster-scoped
+	// resource belongs to no workspace namespace.
+	wsEntries, wsTotal, err := ListAuditLog(10, 0, []string{"prod"}, false, "ws-prod", "")
+	require.NoError(t, err)
+	assert.Equal(t, 1, wsTotal)
+	for _, e := range wsEntries {
+		assert.NotEqual(t, "mycrd.example.com", e.Name)
+	}
+}
+
 func TestListAuditLogIndexedSearch(t *testing.T) {
 	setupAuditTestStore(t)
 
