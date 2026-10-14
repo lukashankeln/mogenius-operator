@@ -82,6 +82,23 @@ func (self *PodInfo) ContainersWithFirstPid() map[ContainerId]ProcessId {
 	return data
 }
 
+// PodProcesses flattens the containers of the given pods into one map. The
+// cpu and ram monitors read /proc/$pid/stat and statm only for these: they
+// report nothing else, and every other container process on the node (pod
+// sandboxes, hostNetwork and kube-system pods) is often unconfined. Reading
+// its stat from an AppArmor-confined container is a ptrace read the kernel
+// audits as DENIED for every process and every second, which fills
+// kern.log, syslog and the journal of the node.
+func PodProcesses(pods []PodInfo) map[ContainerId][]ProcessId {
+	data := map[ContainerId][]ProcessId{}
+	for _, pod := range pods {
+		for containerId, pids := range pod.Containers {
+			data[containerId] = pids
+		}
+	}
+	return data
+}
+
 // To detect changes we have to compare a few properties:
 //
 // - the Namespace and Name have to be equal

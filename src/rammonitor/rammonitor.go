@@ -165,7 +165,7 @@ func (self *ramMonitor) RamUsageGlobal() RamMetrics {
 
 func (self *ramMonitor) collectProcessMetrics() map[containerenumerator.ContainerId][]ProcPidStatm {
 	data := make(map[containerenumerator.ContainerId][]ProcPidStatm)
-	containers := self.containerEnumerator.GetProcessesWithContainerIds()
+	containers := containerenumerator.PodProcesses(self.containerEnumerator.GetPodsWithContainerIds())
 
 	for containerId, pids := range containers {
 		infos := []ProcPidStatm{}
