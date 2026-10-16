@@ -11,6 +11,7 @@ import (
 
 	"mogenius-operator/src/debugcontainer"
 	"mogenius-operator/src/k8sexec"
+	"mogenius-operator/src/sandboxactivity"
 	"mogenius-operator/src/stream"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -110,6 +111,7 @@ func (r ExecResponse) AuditSummary() ExecAuditSummary {
 // target's PID namespace; the working directory is then resolved under
 // /proc/1/root so paths still refer to the target's filesystem.
 func ExecuteCommand(request ExecRequest) (ExecResponse, error) {
+	defer sandboxactivity.Hold(request.Namespace, request.Pod)()
 	ctx := context.Background()
 	plan, err := prepareExec(ctx, request)
 	if err != nil {
@@ -171,6 +173,7 @@ func ExecOutputCap() int {
 // too. A timeout is an outcome here, not an error: the client has the
 // output already and is told what ended the command.
 func StreamCommand(ctx context.Context, request ExecRequest, stdin io.Reader, stdout, stderr io.Writer) (stream.ExecStreamOutcome, error) {
+	defer sandboxactivity.Hold(request.Namespace, request.Pod)()
 	plan, err := prepareExec(ctx, request)
 	if err != nil {
 		return stream.ExecStreamOutcome{}, err

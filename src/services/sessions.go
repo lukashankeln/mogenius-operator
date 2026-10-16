@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"mogenius-operator/src/k8sexec"
+	"mogenius-operator/src/sandboxactivity"
 	"mogenius-operator/src/stream"
 	"mogenius-operator/src/utils"
 )
@@ -261,6 +262,7 @@ func (r *sessionRegistry) remove(session *podSession) {
 
 // CreateSession starts the session's shell and registers it.
 func CreateSession(request SessionCreateRequest) (SessionInfo, error) {
+	sandboxactivity.Touch(request.Namespace, request.Pod)
 	if !sessionIdPattern.MatchString(request.SessionId) {
 		return SessionInfo{}, ErrSessionInvalidId
 	}
@@ -294,6 +296,7 @@ func CreateSession(request SessionCreateRequest) (SessionInfo, error) {
 
 // ListSessions lists the requester's sessions in the pod.
 func ListSessions(request SessionPodRequest) []SessionInfo {
+	sandboxactivity.Touch(request.Namespace, request.Pod)
 	sessions.mu.Lock()
 	defer sessions.mu.Unlock()
 	result := []SessionInfo{}
@@ -315,6 +318,7 @@ func ListSessions(request SessionPodRequest) []SessionInfo {
 
 // GetSession describes one session.
 func GetSession(request SessionRequest) (SessionInfo, error) {
+	sandboxactivity.Touch(request.Namespace, request.Pod)
 	session, err := sessions.get(request)
 	if err != nil {
 		return SessionInfo{}, err
@@ -326,6 +330,7 @@ func GetSession(request SessionRequest) (SessionInfo, error) {
 // the exec stream, and the wrapper the shell runs in kills it together with
 // the running command and that command's children.
 func DeleteSession(request SessionRequest) error {
+	sandboxactivity.Touch(request.Namespace, request.Pod)
 	session, err := sessions.get(request)
 	if err != nil {
 		return err
@@ -340,6 +345,7 @@ func DeleteSession(request SessionRequest) error {
 // background call answers right away. Either way the command keeps running
 // in the shell, and its result stays available in the session.
 func ExecSessionCommand(ctx context.Context, request SessionExecRequest) (SessionExecResponse, error) {
+	sandboxactivity.Touch(request.Namespace, request.Pod)
 	session, err := sessions.get(request.SessionRequest)
 	if err != nil {
 		return SessionExecResponse{}, err
@@ -364,6 +370,7 @@ func ExecSessionCommand(ctx context.Context, request SessionExecRequest) (Sessio
 
 // GetSessionCommand describes one command of a session.
 func GetSessionCommand(request SessionCommandRequest) (SessionCommandInfo, error) {
+	sandboxactivity.Touch(request.Namespace, request.Pod)
 	command, err := findSessionCommand(request)
 	if err != nil {
 		return SessionCommandInfo{}, err
@@ -373,6 +380,7 @@ func GetSessionCommand(request SessionCommandRequest) (SessionCommandInfo, error
 
 // GetSessionCommandLogs is what the command has printed so far.
 func GetSessionCommandLogs(request SessionCommandRequest) (SessionLogsResponse, error) {
+	sandboxactivity.Touch(request.Namespace, request.Pod)
 	command, err := findSessionCommand(request)
 	if err != nil {
 		return SessionLogsResponse{}, err
@@ -382,6 +390,7 @@ func GetSessionCommandLogs(request SessionCommandRequest) (SessionLogsResponse, 
 
 // SendSessionInput writes to the standard input of the running command.
 func SendSessionInput(request SessionInputRequest) error {
+	sandboxactivity.Touch(request.Namespace, request.Pod)
 	session, err := sessions.get(request.SessionRequest)
 	if err != nil {
 		return err
@@ -394,6 +403,7 @@ func SendSessionInput(request SessionInputRequest) error {
 // code is the command's; a session that ended under the command reports
 // SessionEndedExitCode. Truncated says the output cap dropped the rest.
 func FollowSessionCommand(ctx context.Context, request SessionCommandRequest, stdout, stderr io.Writer) (stream.ExecStreamOutcome, error) {
+	defer sandboxactivity.Hold(request.Namespace, request.Pod)()
 	command, err := findSessionCommand(request)
 	if err != nil {
 		return stream.ExecStreamOutcome{}, err
@@ -456,6 +466,35 @@ func RunSessionJanitor(ctx context.Context) {
 
 // idleSince lists sessions without a running command (ended ones included)
 // and not used since the given time.
+// podSessionsBusy reports whether a session of the pod runs a command or has a terminal attached: the auto-stop
+// of sandboxes leaves such a pod alone, also when nobody calls it meanwhile.
+func podSessionsBusy(namespace, pod string) bool {
+	return sessions.busy(namespace, pod)
+}
+
+func (r *sessionRegistry) busy(namespace, pod string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, session := range r.sessions {
+		if session.namespace != namespace || session.pod != pod {
+			continue
+		}
+		attached := false
+		if session.pty != nil {
+			session.pty.mu.Lock()
+			attached = len(session.pty.attachments) > 0
+			session.pty.mu.Unlock()
+		}
+		session.mu.Lock()
+		running := session.current != nil && !session.ended
+		session.mu.Unlock()
+		if running || attached {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *sessionRegistry) idleSince(cutoff time.Time) []*podSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()

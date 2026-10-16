@@ -300,6 +300,9 @@ func startClusterSystems(logManagerModule logging.SlogManager, configModule *con
 	services.StartStorageHelperReaper()
 	logStep("Storage helper reaper started")
 
+	services.StartSandboxAutoStop(systems.leaderElector.IsLeading)
+	logStep("Sandbox auto-stop started")
+
 	systems.nodeMetricsCollector.Orchestrate()
 	logStep("Node metrics collector started")
 

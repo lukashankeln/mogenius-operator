@@ -7,6 +7,7 @@ import (
 	"mogenius-operator/src/dtos"
 	"mogenius-operator/src/k8sexec"
 	mokubernetes "mogenius-operator/src/kubernetes"
+	"mogenius-operator/src/sandboxactivity"
 	"mogenius-operator/src/store"
 	"regexp"
 	"strconv"
@@ -71,6 +72,7 @@ func resolveFileTarget(request dtos.PvcFileRequestDto) (fileExecTarget, error) {
 // where the target's root is /proc/1/root — the same fallback the web
 // terminal, the SSH gateway and exec-request use.
 func resolvePodFileTarget(namespace, podName, container string) (fileExecTarget, error) {
+	sandboxactivity.Touch(namespace, podName)
 	pod := store.GetPod(namespace, podName)
 	if pod == nil {
 		return fileExecTarget{}, fmt.Errorf("pod %s/%s not found", namespace, podName)

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mogenius-operator/src/sandboxactivity"
 	"mogenius-operator/src/sshgateway"
 	"mogenius-operator/src/utils"
 	"net"
@@ -268,6 +269,11 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 			return
 		}
 		logger.Info("Resolved target", "pod", podName, "namespace", request.Namespace, "port", request.RemotePort)
+	}
+
+	// An open port-forward or SSH tunnel keeps an agent sandbox from its auto-stop.
+	if podName != "" {
+		defer sandboxactivity.Hold(request.Namespace, podName)()
 	}
 
 	// Step 2: Connect to the stream gateway

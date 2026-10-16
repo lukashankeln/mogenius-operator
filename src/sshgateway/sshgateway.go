@@ -31,6 +31,7 @@ import (
 	"mogenius-operator/src/debugcontainer"
 	"mogenius-operator/src/k8sclient"
 	"mogenius-operator/src/k8sexec"
+	"mogenius-operator/src/sandboxactivity"
 	"net"
 	"strings"
 	"time"
@@ -167,6 +168,7 @@ func (s *Session) Handle(conn net.Conn, namespace string, podName string, reject
 		return
 	}
 
+	defer sandboxactivity.Hold(namespace, podName)()
 	logger := gwLogger.With("scope", "HandleConnection", "namespace", namespace, "pod", podName, "email", user.Email)
 
 	config := &ssh.ServerConfig{

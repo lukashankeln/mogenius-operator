@@ -17,6 +17,7 @@ import (
 	"mogenius-operator/src/kubernetes"
 	moMetrics "mogenius-operator/src/metrics"
 	"mogenius-operator/src/networkmonitor"
+	"mogenius-operator/src/sandboxactivity"
 	"mogenius-operator/src/schema"
 	"mogenius-operator/src/services"
 	"mogenius-operator/src/shutdown"
@@ -3558,6 +3559,7 @@ func (self *socketApi) upgradeK8sManager(command string) (*structs.Job, error) {
 }
 
 func (self *socketApi) execShConnection(podCmdConnectionRequest stream.PodCmdConnectionRequest) {
+	defer sandboxactivity.Hold(podCmdConnectionRequest.Namespace, podCmdConnectionRequest.Pod)()
 	if podCmdConnectionRequest.SessionId != "" {
 		// A terminal session (MOG-4759): the shell is the session's and runs on
 		// after this connection; attaching creates it when it does not exist.
