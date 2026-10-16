@@ -6,11 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mogenius-operator/src/sandboxactivity"
 	"mogenius-operator/src/sshgateway"
 	"mogenius-operator/src/utils"
 	"net"
-	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -23,8 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/portforward"
-	"k8s.io/client-go/transport/spdy"
 )
 
 // Control message prefixes (text WS frames)
@@ -70,6 +66,9 @@ func pfDialErrorReason(err error) string {
 	}
 	if errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
 		return "no route to target host"
+	}
+	if errors.Is(err, errNoRunningPod) {
+		return errNoRunningPod.Error()
 	}
 	return "dial failed"
 }
@@ -271,9 +270,12 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 		logger.Info("Resolved target", "pod", podName, "namespace", request.Namespace, "port", request.RemotePort)
 	}
 
-	// An open port-forward or SSH tunnel keeps an agent sandbox from its auto-stop.
-	if podName != "" {
-		defer sandboxactivity.Hold(request.Namespace, podName)()
+	// An open port-forward or SSH tunnel keeps an agent sandbox from its
+	// auto-stop. The hold follows the tunnel when it moves to a new pod.
+	hold := newPodHold(request.Namespace)
+	defer hold.release()
+	if isSSH {
+		hold.set(podName)
 	}
 
 	// Step 2: Connect to the stream gateway
@@ -319,12 +321,12 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 	logger.Info("Stream gateway ack received", "msg", string(ackMsg))
 	_ = wsConn.SetReadDeadline(time.Time{})
 
-	// Step 3: Establish the target address to dial per sub-connection.
+	// Step 3: Establish how sub-connections reach the target.
 	//   - host targets: dial the external host/IP directly.
-	//   - k8s targets:  start a kube-apiserver port-forward on a random local
-	//     port and dial 127.0.0.1:<localPort>.
+	//   - k8s targets:  a kube-apiserver port-forward to the target's current
+	//     pod, rebuilt on the next pod when that one goes away.
 	var dialAddr string
-	var stopChan chan struct{} // non-nil only for the k8s port-forward path
+	var forwarder *podForwarder // non-nil only for the k8s port-forward path
 
 	if isSSH {
 		// Nothing to dial: sub-connections are served by the in-process SSH
@@ -332,70 +334,33 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 	} else if isHost {
 		dialAddr = net.JoinHostPort(request.WorkloadName, strconv.Itoa(request.RemotePort))
 	} else {
-		localListener, err := net.Listen("tcp", "127.0.0.1:0")
-		if err != nil {
-			logger.Error("Failed to create local listener", "error", err)
-			return
-		}
-		localPort := localListener.Addr().(*net.TCPAddr).Port
-		_ = localListener.Close()
-
-		stopChan = make(chan struct{})
-		readyChan := make(chan struct{})
-		errChan := make(chan error, 1)
-
-		go func() {
-			pfURL, err := url.Parse(fmt.Sprintf("%s/api/v1/namespaces/%s/pods/%s/portforward",
-				pfRestConfig.Host, request.Namespace, podName))
-			if err != nil {
-				errChan <- fmt.Errorf("invalid URL: %w", err)
-				return
-			}
-
-			transport, upgrader, err := spdy.RoundTripperFor(pfRestConfig)
-			if err != nil {
-				errChan <- fmt.Errorf("SPDY transport: %w", err)
-				return
-			}
-
-			spdyDialer := spdy.NewDialer(upgrader, &http.Client{Transport: transport}, http.MethodPost, pfURL)
-			ports := []string{fmt.Sprintf("%d:%d", localPort, request.RemotePort)}
-
-			fw, err := portforward.New(spdyDialer, ports, stopChan, readyChan, io.Discard, io.Discard)
-			if err != nil {
-				errChan <- fmt.Errorf("portforward create: %w", err)
-				return
-			}
-
-			if err := fw.ForwardPorts(); err != nil {
-				errChan <- err
-			}
-		}()
-
-		// Wait for port-forward to be ready
-		select {
-		case <-readyChan:
-			logger.Info("K8s port-forward established", "localPort", localPort, "remotePort", request.RemotePort)
-		case err := <-errChan:
+		forwarder = newPodForwarder(
+			logger,
+			func() (string, error) { return resolvePortForwardTarget(pfClientset, request) },
+			func(pod string) (*podForward, error) {
+				return startKubePodForward(request.Namespace, pod, request.RemotePort)
+			},
+			hold,
+		)
+		if err := forwarder.startOn(podName); err != nil {
 			logger.Error("K8s port-forward failed", "error", err)
 			wsMu.Lock()
 			_ = wsConn.WriteMessage(websocket.TextMessage, []byte("ERROR: "+err.Error()))
 			wsMu.Unlock()
 			return
-		case <-time.After(30 * time.Second):
-			logger.Error("K8s port-forward timeout")
-			close(stopChan)
-			return
 		}
-
-		dialAddr = fmt.Sprintf("127.0.0.1:%d", localPort)
+		logger.Info("K8s port-forward established", "pod", podName, "remotePort", request.RemotePort)
 	}
 
-	logger.Info("Tunnel ready, waiting for client data", "dialAddr", dialAddr)
+	logger.Info("Tunnel ready, waiting for client data", "target", request.WorkloadName, "dialAddr", dialAddr)
 
 	done := make(chan struct{})
 	var once sync.Once
 	closeDone := func() { once.Do(func() { close(done) }) }
+
+	if forwarder != nil {
+		go forwarder.run(done)
+	}
 
 	// Connection map: connID → local TCP connection to k8s port-forward
 	conns := make(map[string]net.Conn)
@@ -512,6 +477,17 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 				// tunnel like any TCP sub-connection, the other end speaks
 				// SSH with the embedded gateway server.
 				if isSSH {
+					// Resolved per session rather than once per tunnel: after
+					// a rollout the pod resolved at open time is gone.
+					target, err := resolveSSHTarget(sshSession.Clientset(), request)
+					if err != nil {
+						logger.Error("Failed to resolve SSH target to pod", "connID", connID, "error", err)
+						_ = wsSendText(pfmErrorPrefix + connID + ":no running pod for the target")
+						_ = wsSendText(pfmClosePrefix + connID)
+						continue
+					}
+					hold.set(target)
+
 					tunnelEnd, sshEnd := net.Pipe()
 					connsMu.Lock()
 					conns[connID] = tunnelEnd
@@ -523,14 +499,20 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 					reject := func(reason string) {
 						_ = wsSendText(pfmErrorPrefix + connID + ":" + reason)
 					}
-					go sshSession.Handle(sshEnd, request.Namespace, podName, reject)
+					go sshSession.Handle(sshEnd, request.Namespace, target, reject)
 					go readLocalAndSend(connID, tunnelEnd)
 					continue
 				}
 
-				localConn, err := net.DialTimeout("tcp", dialAddr, 5*time.Second)
+				var localConn net.Conn
+				var err error
+				if forwarder != nil {
+					localConn, err = forwarder.dial(done, 5*time.Second)
+				} else {
+					localConn, err = net.DialTimeout("tcp", dialAddr, 5*time.Second)
+				}
 				if err != nil {
-					logger.Error("Failed to dial target", "connID", connID, "dialAddr", dialAddr, "error", err)
+					logger.Error("Failed to dial target", "connID", connID, "target", request.WorkloadName, "error", err)
 					_ = wsSendText(pfmErrorPrefix + connID + ":" + pfDialErrorReason(err))
 					_ = wsSendText(pfmClosePrefix + connID)
 					continue
@@ -590,8 +572,8 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 	}
 	connsMu.Unlock()
 
-	if stopChan != nil {
-		close(stopChan)
+	if forwarder != nil {
+		forwarder.close()
 	}
 	logger.Info("Port-forward tunnel closed", "target", request.WorkloadName, "port", request.RemotePort)
 }
@@ -695,9 +677,9 @@ func resolvePortForwardTarget(clientset k8s.Interface, req PortForwardConnection
 		return "", fmt.Errorf("failed to list pods: %w", err)
 	}
 
-	if len(pods.Items) == 0 {
+	podName, ok := pickRunningPod(pods.Items)
+	if !ok {
 		return "", fmt.Errorf("no running pods found for selector %q", labelSelector)
 	}
-
-	return pods.Items[0].Name, nil
+	return podName, nil
 }
