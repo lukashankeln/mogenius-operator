@@ -340,6 +340,7 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 			func(pod string) (*podForward, error) {
 				return startKubePodForward(request.Namespace, pod, request.RemotePort)
 			},
+			func(pod string) (bool, error) { return podAlive(pfClientset, request.Namespace, pod) },
 			hold,
 		)
 		if err := forwarder.startOn(podName); err != nil {
@@ -388,6 +389,7 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 
 	// readLocalAndSend reads from a local TCP connection and sends binary WS frames.
 	readLocalAndSend := func(connID string, localConn net.Conn) {
+		receivedAny := false
 		defer func() {
 			connsMu.Lock()
 			delete(conns, connID)
@@ -395,12 +397,18 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 			_ = localConn.Close()
 			_ = wsSendText(pfmClosePrefix + connID)
 			logger.Info("Sub-connection closed", "connID", connID)
+			// Closed before the pod sent a byte: the forward may point at a
+			// pod that is gone while its local port still accepts.
+			if !receivedAny && forwarder != nil {
+				forwarder.requestCheck()
+			}
 		}()
 
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := localConn.Read(buf)
 			if n > 0 {
+				receivedAny = true
 				if writeErr := wsSendBinary(connID, buf[:n]); writeErr != nil {
 					logger.Info("WS write error", "connID", connID, "error", writeErr)
 					return

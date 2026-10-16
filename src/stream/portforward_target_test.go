@@ -172,10 +172,32 @@ func (h *holdRecorder) count(pod string) int {
 
 func testForwarder(resolve func() (string, error), start func(string) (*podForward, error), holds *holdRecorder) *podForwarder {
 	hold := &podHold{namespace: "ns", hold: holds.hold}
-	f := newPodForwarder(slog.New(slog.NewTextHandler(io.Discard, nil)), resolve, start, hold)
+	alwaysAlive := func(string) (bool, error) { return true, nil }
+	f := newPodForwarder(slog.New(slog.NewTextHandler(io.Discard, nil)), resolve, start, alwaysAlive, hold)
 	f.minBackoff, f.maxBackoff = time.Millisecond, 4*time.Millisecond
 	f.rebuildDialWait = 200 * time.Millisecond
+	// Long enough that no test sees a tick unless it shortens it.
+	f.checkInterval = time.Hour
 	return f
+}
+
+// livePods answers alive() from a set the test changes.
+type livePods struct {
+	mu   sync.Mutex
+	pods map[string]bool
+	err  error
+}
+
+func (l *livePods) alive(pod string) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.pods[pod], l.err
+}
+
+func (l *livePods) kill(pod string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.pods[pod] = false
 }
 
 // currentPod reads the forwarder's pod under its lock; run swaps it concurrently.
@@ -295,4 +317,77 @@ func TestPodForwarderCloseStopsTheForwardAndReleasesTheHold(t *testing.T) {
 		t.Fatal("the forward was not stopped")
 	}
 	assert.Equal(t, 0, holds.count("web"))
+}
+
+// The forward does not always end when its pod goes away. The periodic check
+// notices the pod is gone and moves the tunnel anyway.
+func TestPodForwarderRebuildsWhenThePodIsGoneButTheForwardLivesOn(t *testing.T) {
+	forwards := newFakeForwards()
+	holds := &holdRecorder{open: map[string]int{}}
+	live := &livePods{pods: map[string]bool{"web-old": true, "web-new": true}}
+	f := testForwarder(sequence("web-new"), forwards.start(t, true), holds)
+	f.alive = live.alive
+	f.checkInterval = 5 * time.Millisecond
+	done := make(chan struct{})
+	defer close(done)
+
+	require.NoError(t, f.startOn("web-old"))
+	go f.run(done)
+	live.kill("web-old")
+
+	assert.Eventually(t, func() bool { return currentPod(f) == "web-new" }, time.Second, 5*time.Millisecond)
+}
+
+func TestPodForwarderKeepsTheForwardWhenThePodCannotBeChecked(t *testing.T) {
+	forwards := newFakeForwards()
+	holds := &holdRecorder{open: map[string]int{}}
+	live := &livePods{pods: map[string]bool{}, err: errors.New("kube-apiserver unavailable")}
+	f := testForwarder(sequence("web-new"), forwards.start(t, true), holds)
+	f.alive = live.alive
+	f.checkInterval = 2 * time.Millisecond
+	done := make(chan struct{})
+	defer close(done)
+
+	require.NoError(t, f.startOn("web-old"))
+	go f.run(done)
+	time.Sleep(30 * time.Millisecond)
+
+	assert.Equal(t, "web-old", currentPod(f))
+	assert.Equal(t, []string{"web-old"}, forwards.startedPods())
+}
+
+// An empty connection only asks for a check: a live pod keeps its forward
+// (a rebuild would cut every other open connection), a dead one is replaced.
+func TestPodForwarderRequestCheckRebuildsOnlyForAGonePod(t *testing.T) {
+	forwards := newFakeForwards()
+	holds := &holdRecorder{open: map[string]int{}}
+	live := &livePods{pods: map[string]bool{"web-old": true, "web-new": true}}
+	f := testForwarder(sequence("web-new"), forwards.start(t, true), holds)
+	f.alive = live.alive
+	done := make(chan struct{})
+	defer close(done)
+
+	require.NoError(t, f.startOn("web-old"))
+	go f.run(done)
+
+	f.requestCheck()
+	time.Sleep(30 * time.Millisecond)
+	assert.Equal(t, "web-old", currentPod(f))
+
+	live.kill("web-old")
+	f.requestCheck()
+	assert.Eventually(t, func() bool { return currentPod(f) == "web-new" }, time.Second, 5*time.Millisecond)
+}
+
+func TestPodAlive(t *testing.T) {
+	running := testPod("running", corev1.PodRunning, true, false)
+	terminating := testPod("terminating", corev1.PodRunning, true, true)
+	pending := testPod("pending", corev1.PodPending, false, false)
+	clientset := fake.NewSimpleClientset(&running, &terminating, &pending)
+
+	for pod, want := range map[string]bool{"running": true, "terminating": false, "pending": false, "deleted": false} {
+		got, err := podAlive(clientset, "ns", pod)
+		require.NoError(t, err, pod)
+		assert.Equal(t, want, got, pod)
+	}
 }

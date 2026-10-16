@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -13,6 +14,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/portforward"
 	"k8s.io/client-go/transport/spdy"
 )
@@ -31,6 +35,12 @@ const (
 // How long opening a sub-connection waits for a rebuilt port-forward after its
 // dial failed, before it reports the target as unreachable.
 const pfRebuildDialWait = 5 * time.Second
+
+// How often a tunnel checks that the pod its port-forward reaches still runs.
+// The forward does not always end when its pod goes away: the connection to
+// the kube-apiserver can stay up while every stream to the deleted pod fails,
+// so the local port keeps accepting and only the bytes never arrive.
+const pfPodCheckInterval = 5 * time.Second
 
 // errNoRunningPod: the tunnel's port-forward is gone and no pod of the target
 // came up in time to rebuild it (a rollout still in progress, a scale to zero).
@@ -119,11 +129,15 @@ type podForwarder struct {
 	logger  *slog.Logger
 	resolve func() (string, error)
 	start   func(podName string) (*podForward, error)
-	hold    *podHold
+	// alive reports whether the pod still runs; an error means "unknown" and
+	// never triggers a rebuild on its own.
+	alive func(podName string) (bool, error)
+	hold  *podHold
 
 	minBackoff      time.Duration
 	maxBackoff      time.Duration
 	rebuildDialWait time.Duration
+	checkInterval   time.Duration
 
 	mu      sync.Mutex
 	current *podForward
@@ -133,19 +147,31 @@ type podForwarder struct {
 	// rebuild asks run to replace the current forward now; capacity 1, so
 	// any number of failed dials collapse into one rebuild.
 	rebuild chan struct{}
+	// check asks run to look at the pod now rather than at the next tick;
+	// capacity 1 as well.
+	check chan struct{}
 }
 
-func newPodForwarder(logger *slog.Logger, resolve func() (string, error), start func(string) (*podForward, error), hold *podHold) *podForwarder {
+func newPodForwarder(
+	logger *slog.Logger,
+	resolve func() (string, error),
+	start func(string) (*podForward, error),
+	alive func(string) (bool, error),
+	hold *podHold,
+) *podForwarder {
 	return &podForwarder{
 		logger:          logger,
 		resolve:         resolve,
 		start:           start,
+		alive:           alive,
 		hold:            hold,
 		minBackoff:      pfRebuildMinBackoff,
 		maxBackoff:      pfRebuildMaxBackoff,
 		rebuildDialWait: pfRebuildDialWait,
+		checkInterval:   pfPodCheckInterval,
 		changed:         make(chan struct{}),
 		rebuild:         make(chan struct{}, 1),
+		check:           make(chan struct{}, 1),
 	}
 }
 
@@ -171,8 +197,11 @@ func (f *podForwarder) set(forward *podForward) {
 }
 
 // run watches the current forward until done closes, and rebuilds it when it
-// is lost or a dial through it failed.
+// is lost, a dial through it failed, or its pod no longer runs.
 func (f *podForwarder) run(done <-chan struct{}) {
+	ticker := time.NewTicker(f.checkInterval)
+	defer ticker.Stop()
+
 	for {
 		f.mu.Lock()
 		current := f.current
@@ -190,10 +219,35 @@ func (f *podForwarder) run(done <-chan struct{}) {
 			f.logger.Warn("Port-forward lost, re-resolving target", "pod", current.podName, "error", current.err)
 		case <-f.rebuild:
 			f.logger.Warn("Dial through port-forward failed, re-resolving target", "pod", podNameOf(current))
+		case <-ticker.C:
+			if f.podRuns(current) {
+				continue
+			}
+		case <-f.check:
+			if f.podRuns(current) {
+				continue
+			}
 		}
 
 		f.replace(current, done)
 	}
+}
+
+// podRuns reports whether the forward's pod still runs. Unknown counts as
+// running: a failed lookup must not tear down a working tunnel.
+func (f *podForwarder) podRuns(current *podForward) bool {
+	if current == nil {
+		return true
+	}
+	running, err := f.alive(current.podName)
+	if err != nil {
+		f.logger.Debug("Could not check the tunnel's pod", "pod", current.podName, "error", err)
+		return true
+	}
+	if !running {
+		f.logger.Warn("Tunnel's pod is gone, re-resolving target", "pod", current.podName)
+	}
+	return running
 }
 
 // replace stops the old forward and retries resolve + start with backoff
@@ -252,6 +306,17 @@ func (f *podForwarder) forwardOtherThan(failed *podForward, wait time.Duration, 
 		case <-done:
 			return nil, false
 		}
+	}
+}
+
+// requestCheck asks run to look at the pod now. Used when a sub-connection
+// ended without a single byte from the pod — a sign the pod may be gone, but
+// also what a target that closes idle connections does, so it only checks and
+// never rebuilds blindly (a rebuild cuts every other open connection).
+func (f *podForwarder) requestCheck() {
+	select {
+	case f.check <- struct{}{}:
+	default:
 	}
 }
 
@@ -339,6 +404,20 @@ func (h *podHold) release() {
 		h.releaseFn()
 	}
 	h.pod, h.releaseFn = "", nil
+}
+
+// podAlive reports whether the pod exists, is not being deleted and runs.
+func podAlive(clientset k8s.Interface, namespace, podName string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pod, err := clientset.CoreV1().Pods(namespace).Get(ctx, podName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return pod.DeletionTimestamp == nil && pod.Status.Phase == corev1.PodRunning, nil
 }
 
 // pickRunningPod chooses the pod a tunnel should reach: never one that is
