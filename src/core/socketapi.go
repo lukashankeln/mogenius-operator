@@ -3311,7 +3311,7 @@ func (self *socketApi) dispatchClientMessages(client websocket.WebsocketClient, 
 		handler, exists := self.patternHandler[datagram.Pattern]
 
 		if exists && (handler.Client == nil || handler.Client == client) {
-			self.handlePatternRequest(datagram, client)
+			self.handlePatternRequest(handler, datagram, client)
 		} else {
 			self.sendNoHandlerError(client, datagram)
 		}
@@ -3353,7 +3353,7 @@ func (self *socketApi) clientName(client websocket.WebsocketClient) string {
 	return "unknown"
 }
 
-func (self *socketApi) handlePatternRequest(datagram structs.Datagram, responseClient websocket.WebsocketClient) {
+func (self *socketApi) handlePatternRequest(handler PatternHandler, datagram structs.Datagram, responseClient websocket.WebsocketClient) {
 	self.logger.Info("handling pattern request", "pattern", datagram.Pattern, "wsClient", self.clientName(responseClient))
 
 	if datagram.Zlib {
@@ -3380,7 +3380,7 @@ func (self *socketApi) handlePatternRequest(datagram structs.Datagram, responseC
 	}
 
 	start := time.Now()
-	responsePayload := self.ExecuteCommandRequest(datagram)
+	responsePayload := self.invokeHandler(handler, datagram)
 	executionTime := time.Since(start)
 	self.logdatagram(executionTime, datagram)
 
@@ -3537,10 +3537,7 @@ func (self *socketApi) JobServerSendData(jobClient websocket.WebsocketClient, da
 
 func (self *socketApi) ExecuteCommandRequest(datagram structs.Datagram) any {
 	if patternHandler, ok := self.patternHandler[datagram.Pattern]; ok {
-		start := time.Now()
-		result := patternHandler.Callback(datagram)
-		moMetrics.ObservePatternDuration(datagram.Pattern, time.Since(start).Seconds())
-		return result
+		return self.invokeHandler(patternHandler, datagram)
 	}
 
 	return struct {
@@ -3550,6 +3547,17 @@ func (self *socketApi) ExecuteCommandRequest(datagram structs.Datagram) any {
 		Status:  "error",
 		Message: "Pattern not found",
 	}
+}
+
+// invokeHandler runs an already-resolved handler's callback and records its
+// duration. Shared by ExecuteCommandRequest (which still has to look the
+// handler up itself, e.g. for the HTTP entrypoint) and handlePatternRequest
+// (which already resolved the handler while routing the message).
+func (self *socketApi) invokeHandler(handler PatternHandler, datagram structs.Datagram) any {
+	start := time.Now()
+	result := handler.Callback(datagram)
+	moMetrics.ObservePatternDuration(datagram.Pattern, time.Since(start).Seconds())
+	return result
 }
 
 func (self *socketApi) upgradeK8sManager(command string) (*structs.Job, error) {
