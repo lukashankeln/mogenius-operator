@@ -10,7 +10,6 @@ import (
 	"mogenius-operator/src/containerenumerator"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -197,21 +196,10 @@ func (self *networkMonitor) metricsToPodstats(
 ) []PodNetworkStats {
 	data := []PodNetworkStats{}
 
-	containerIds := []ContainerId{}
-	for containerId := range metrics {
-		containerIds = append(containerIds, containerId)
-	}
-	slices.Sort(containerIds)
-
-	for _, containerId := range containerIds {
-		containerInfo := metrics[containerId]
-
-		interfaceNames := []InterfaceName{}
-		for interfaceName := range containerInfo.Metrics {
-			interfaceNames = append(interfaceNames, interfaceName)
-		}
-		slices.Sort(interfaceNames)
-
+	// Iteration order doesn't matter here: each entry is an independent sum
+	// over that container's interfaces, so sorting containerIds/interfaceNames
+	// only burned CPU and allocations without changing any written value.
+	for _, containerInfo := range metrics {
 		// Aggregate all interfaces for this container into a single entry.
 		// Creating one entry per interface caused cross-interface delta calculations
 		// in AddInterfaceStatsToDb because lastStatsMap is keyed by pod name only.
@@ -220,8 +208,7 @@ func (self *networkMonitor) metricsToPodstats(
 			Namespace: containerInfo.PodInfo.Namespace,
 			CreatedAt: time.Now(),
 		}
-		for _, interfaceName := range interfaceNames {
-			iMetrics := containerInfo.Metrics[interfaceName]
+		for interfaceName, iMetrics := range containerInfo.Metrics {
 			// filter blacklisted interface names e.g. loopback
 			if interfaceName == "lo" {
 				continue
