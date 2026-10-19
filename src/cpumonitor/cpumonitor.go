@@ -39,7 +39,17 @@ type cpuMonitor struct {
 	cpuUsageGlobalRx chan CpuMetrics
 
 	cpuUsageProcessesTx chan struct{}
-	cpuUsageProcessesRx chan map[containerenumerator.ContainerId][]ProcPidStat
+	cpuUsageProcessesRx chan cpuProcessMetricsSnapshot
+}
+
+// cpuProcessMetricsSnapshot bundles the pod list together with the per-container
+// stats collected from the same enumerator read. Returning them separately would
+// require CpuUsageProcesses to query the container enumerator a second time,
+// which could race against the enumerator's own 5s cache refresh and return a
+// pods list from a different generation than the stats it's being matched against.
+type cpuProcessMetricsSnapshot struct {
+	pods []containerenumerator.PodInfo
+	data map[containerenumerator.ContainerId][]ProcPidStat
 }
 
 func NewCpuMonitor(
@@ -64,7 +74,7 @@ func NewCpuMonitor(
 	self.cpuUsageGlobalTx = make(chan struct{})
 	self.cpuUsageGlobalRx = make(chan CpuMetrics)
 	self.cpuUsageProcessesTx = make(chan struct{})
-	self.cpuUsageProcessesRx = make(chan map[containerenumerator.ContainerId][]ProcPidStat)
+	self.cpuUsageProcessesRx = make(chan cpuProcessMetricsSnapshot)
 
 	return self
 }
@@ -93,7 +103,7 @@ func (self *cpuMonitor) startCollector() {
 				case <-self.cpuUsageGlobalTx:
 					self.cpuUsageGlobalRx <- CpuMetrics{}
 				case <-self.cpuUsageProcessesTx:
-					self.cpuUsageProcessesRx <- nil
+					self.cpuUsageProcessesRx <- cpuProcessMetricsSnapshot{}
 				}
 			}
 		}()
@@ -245,10 +255,11 @@ type CpuMetrics struct {
 	Idle   float64 `json:"idle"`
 }
 
-func (self *cpuMonitor) collectProcessMetrics() map[containerenumerator.ContainerId][]ProcPidStat {
-	data := map[containerenumerator.ContainerId][]ProcPidStat{}
-	containers := containerenumerator.PodProcesses(self.containerEnumerator.GetPodsWithContainerIds())
+func (self *cpuMonitor) collectProcessMetrics() cpuProcessMetricsSnapshot {
+	pods := self.containerEnumerator.GetPodsWithContainerIds()
+	containers := containerenumerator.PodProcesses(pods)
 
+	data := map[containerenumerator.ContainerId][]ProcPidStat{}
 	for containerId, pids := range containers {
 		infos := []ProcPidStat{}
 		for _, pid := range pids {
@@ -261,16 +272,14 @@ func (self *cpuMonitor) collectProcessMetrics() map[containerenumerator.Containe
 		data[containerId] = infos
 	}
 
-	return data
+	return cpuProcessMetricsSnapshot{pods: pods, data: data}
 }
 
 func (self *cpuMonitor) CpuUsageProcesses() []PodCpuStats {
 	self.startCollector()
 
 	self.cpuUsageProcessesTx <- struct{}{}
-	data := <-self.cpuUsageProcessesRx
-
-	pods := self.containerEnumerator.GetPodsWithContainerIds()
+	snapshot := <-self.cpuUsageProcessesRx
 
 	stats := []PodCpuStats{}
 	uptimepath := filepath.Join(self.procPath, "uptime")
@@ -286,9 +295,9 @@ func (self *cpuMonitor) CpuUsageProcesses() []PodCpuStats {
 		return stats
 	}
 
-	for _, pod := range pods {
+	for _, pod := range snapshot.pods {
 		for containerId := range pod.Containers {
-			procPidStatm, ok := data[containerId]
+			procPidStatm, ok := snapshot.data[containerId]
 			if !ok {
 				continue
 			}
