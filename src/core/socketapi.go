@@ -33,6 +33,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"encoding/json"
@@ -145,9 +146,18 @@ type socketApi struct {
 
 	logLevelMo bool
 
-	// the patternHandler should only be edited on startup
+	// patternHandler is only ever written during registerPatterns(), which
+	// runs synchronously in NewSocketApi() before Run() spawns any dispatch
+	// goroutine. patternHandlerLock guards that startup-time write; once
+	// dispatch is running the map is read-only, so hot-path reads (see
+	// dispatchClientMessages and ExecuteCommandRequest) intentionally skip it.
+	// patternsFrozen enforces that invariant: Run() sets it before starting
+	// dispatch, and AddPatternHandlerForClient asserts against it, so a
+	// handler registered too late fails fast instead of silently depending on
+	// the lock-free reads below being safe.
 	patternHandlerLock    sync.RWMutex
 	patternHandler        map[string]PatternHandler
+	patternsFrozen        atomic.Bool
 	httpService           HttpService
 	streamService         StreamService
 	apiService            Api
@@ -242,6 +252,7 @@ func (self *socketApi) Run() {
 	assert.Assert(self.streamService != nil)
 
 	self.AssertPatternsUnique()
+	self.patternsFrozen.Store(true)
 	self.startMessageHandler()
 
 	self.statusLock.Lock()
@@ -390,6 +401,7 @@ func (self *socketApi) AddPatternHandlerForClient(
 ) {
 	assert.Assert(config.RequestSchema != nil, "config.RequestSchema has to be set")
 	assert.Assert(config.ResponseSchema != nil, "config.ResponseSchema has to be set")
+	assert.Assert(!self.patternsFrozen.Load(), "pattern handlers may only be registered before Run() starts dispatching", pattern)
 
 	self.patternHandlerLock.Lock()
 	defer self.patternHandlerLock.Unlock()
@@ -3294,12 +3306,12 @@ func (self *socketApi) startClientReadLoop(client websocket.WebsocketClient) {
 // to a client only serves that one. Exits when jobs is closed.
 func (self *socketApi) dispatchClientMessages(client websocket.WebsocketClient, jobs <-chan structs.Datagram) {
 	for datagram := range jobs {
-		self.patternHandlerLock.RLock()
+		// No lock: patternHandler is read-only by the time dispatch runs, see
+		// the field comment on patternHandlerLock.
 		handler, exists := self.patternHandler[datagram.Pattern]
-		self.patternHandlerLock.RUnlock()
 
 		if exists && (handler.Client == nil || handler.Client == client) {
-			self.handlePatternRequest(datagram, client)
+			self.handlePatternRequest(handler, datagram, client)
 		} else {
 			self.sendNoHandlerError(client, datagram)
 		}
@@ -3341,7 +3353,7 @@ func (self *socketApi) clientName(client websocket.WebsocketClient) string {
 	return "unknown"
 }
 
-func (self *socketApi) handlePatternRequest(datagram structs.Datagram, responseClient websocket.WebsocketClient) {
+func (self *socketApi) handlePatternRequest(handler PatternHandler, datagram structs.Datagram, responseClient websocket.WebsocketClient) {
 	self.logger.Info("handling pattern request", "pattern", datagram.Pattern, "wsClient", self.clientName(responseClient))
 
 	if datagram.Zlib {
@@ -3368,7 +3380,7 @@ func (self *socketApi) handlePatternRequest(datagram structs.Datagram, responseC
 	}
 
 	start := time.Now()
-	responsePayload := self.ExecuteCommandRequest(datagram)
+	responsePayload := self.invokeHandler(handler, datagram)
 	executionTime := time.Since(start)
 	self.logdatagram(executionTime, datagram)
 
@@ -3525,10 +3537,7 @@ func (self *socketApi) JobServerSendData(jobClient websocket.WebsocketClient, da
 
 func (self *socketApi) ExecuteCommandRequest(datagram structs.Datagram) any {
 	if patternHandler, ok := self.patternHandler[datagram.Pattern]; ok {
-		start := time.Now()
-		result := patternHandler.Callback(datagram)
-		moMetrics.ObservePatternDuration(datagram.Pattern, time.Since(start).Seconds())
-		return result
+		return self.invokeHandler(patternHandler, datagram)
 	}
 
 	return struct {
@@ -3538,6 +3547,17 @@ func (self *socketApi) ExecuteCommandRequest(datagram structs.Datagram) any {
 		Status:  "error",
 		Message: "Pattern not found",
 	}
+}
+
+// invokeHandler runs an already-resolved handler's callback and records its
+// duration. Shared by ExecuteCommandRequest (which still has to look the
+// handler up itself, e.g. for the HTTP entrypoint) and handlePatternRequest
+// (which already resolved the handler while routing the message).
+func (self *socketApi) invokeHandler(handler PatternHandler, datagram structs.Datagram) any {
+	start := time.Now()
+	result := handler.Callback(datagram)
+	moMetrics.ObservePatternDuration(datagram.Pattern, time.Since(start).Seconds())
+	return result
 }
 
 func (self *socketApi) upgradeK8sManager(command string) (*structs.Job, error) {
