@@ -16,8 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	gorillaWebsocket "github.com/gorilla/websocket"
 	"mogenius-operator/src/metrics"
+
+	gorillaWebsocket "github.com/gorilla/websocket"
 )
 
 // writeDeadline bounds how long a single websocket write may block.
@@ -199,7 +200,9 @@ func (self *websocketClient) WriteMessage(messageType int, data []byte) error {
 		case <-self.ctx.Done():
 			return fmt.Errorf("WebsocketClient is terminated")
 		case err := <-self.apiWriteMessageRx:
-			self.apiLogger.Debug("WriteMessage", "messageType", messageType, "data", data, "error", err)
+			if self.apiLogger.Enabled(context.Background(), slog.LevelDebug) {
+				self.apiLogger.Debug("WriteMessage", "messageType", messageType, "data", data, "error", err)
+			}
 			return err
 		}
 	}
@@ -263,7 +266,9 @@ func (self *websocketClient) ReadJSON(buf any) error {
 		case <-self.ctx.Done():
 			return fmt.Errorf("WebsocketClient is terminated")
 		case err := <-self.apiReadJsonRx:
-			self.apiLogger.Debug("ReadJSON", "result", buf, "error", err)
+			if self.apiLogger.Enabled(context.Background(), slog.LevelDebug) {
+				self.apiLogger.Debug("ReadJSON", "result", buf, "error", err)
+			}
 			return err
 		}
 	}
@@ -673,7 +678,9 @@ func (self *websocketClient) startWriteThread() {
 			self.healthcheck(err)
 		case val := <-self.apiWriteMessageTx:
 			assert.Assert(self.connection != nil)
-			self.writeLogger.Debug("WriteMessage", "type", val.messageType, "data", val.data)
+			if self.writeLogger.Enabled(context.Background(), slog.LevelDebug) {
+				self.writeLogger.Debug("WriteMessage", "type", val.messageType, "data", val.data)
+			}
 			_ = self.connection.SetWriteDeadline(time.Now().Add(writeDeadline))
 			err := self.connection.WriteMessage(val.messageType, val.data)
 			self.writeLogger.Debug("WriteMessage", "error", err)
