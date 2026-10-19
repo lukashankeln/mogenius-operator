@@ -33,7 +33,17 @@ type ramMonitor struct {
 	ramUsageGlobalRx chan RamMetrics
 
 	ramUsageProcessesTx chan struct{}
-	ramUsageProcessesRx chan map[containerenumerator.ContainerId][]ProcPidStatm
+	ramUsageProcessesRx chan ramProcessMetricsSnapshot
+}
+
+// ramProcessMetricsSnapshot bundles the pod list together with the per-container
+// stats collected from the same enumerator read. Returning them separately would
+// require RamUsageProcesses to query the container enumerator a second time,
+// which could race against the enumerator's own 5s cache refresh and return a
+// pods list from a different generation than the stats it's being matched against.
+type ramProcessMetricsSnapshot struct {
+	pods []containerenumerator.PodInfo
+	data map[containerenumerator.ContainerId][]ProcPidStatm
 }
 
 func NewRamMonitor(logger *slog.Logger, config config.ConfigModule, clientProvider k8sclient.K8sClientProvider, containerEnumerator containerenumerator.ContainerEnumerator) RamMonitor {
@@ -49,7 +59,7 @@ func NewRamMonitor(logger *slog.Logger, config config.ConfigModule, clientProvid
 	self.ramUsageGlobalTx = make(chan struct{})
 	self.ramUsageGlobalRx = make(chan RamMetrics)
 	self.ramUsageProcessesTx = make(chan struct{})
-	self.ramUsageProcessesRx = make(chan map[containerenumerator.ContainerId][]ProcPidStatm)
+	self.ramUsageProcessesRx = make(chan ramProcessMetricsSnapshot)
 
 	return self
 }
@@ -69,7 +79,7 @@ func (self *ramMonitor) startCollector() {
 				case <-self.ramUsageGlobalTx:
 					self.ramUsageGlobalRx <- RamMetrics{}
 				case <-self.ramUsageProcessesTx:
-					self.ramUsageProcessesRx <- nil
+					self.ramUsageProcessesRx <- ramProcessMetricsSnapshot{}
 				}
 			}
 		}()
@@ -163,10 +173,11 @@ func (self *ramMonitor) RamUsageGlobal() RamMetrics {
 	return data
 }
 
-func (self *ramMonitor) collectProcessMetrics() map[containerenumerator.ContainerId][]ProcPidStatm {
-	data := make(map[containerenumerator.ContainerId][]ProcPidStatm)
-	containers := containerenumerator.PodProcesses(self.containerEnumerator.GetPodsWithContainerIds())
+func (self *ramMonitor) collectProcessMetrics() ramProcessMetricsSnapshot {
+	pods := self.containerEnumerator.GetPodsWithContainerIds()
+	containers := containerenumerator.PodProcesses(pods)
 
+	data := make(map[containerenumerator.ContainerId][]ProcPidStatm)
 	for containerId, pids := range containers {
 		infos := []ProcPidStatm{}
 		for _, pid := range pids {
@@ -179,21 +190,19 @@ func (self *ramMonitor) collectProcessMetrics() map[containerenumerator.Containe
 		data[containerId] = infos
 	}
 
-	return data
+	return ramProcessMetricsSnapshot{pods: pods, data: data}
 }
 
 func (self *ramMonitor) RamUsageProcesses() []PodRamStats {
 	self.startCollector()
 
 	self.ramUsageProcessesTx <- struct{}{}
-	data := <-self.ramUsageProcessesRx
-
-	pods := self.containerEnumerator.GetPodsWithContainerIds()
+	snapshot := <-self.ramUsageProcessesRx
 
 	stats := []PodRamStats{}
-	for _, pod := range pods {
+	for _, pod := range snapshot.pods {
 		for containerId := range pod.Containers {
-			procPidStatm, ok := data[containerId]
+			procPidStatm, ok := snapshot.data[containerId]
 			if !ok {
 				continue
 			}
