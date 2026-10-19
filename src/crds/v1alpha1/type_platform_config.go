@@ -55,8 +55,7 @@ type PlatformConfig struct {
 // as enabled:false would tear down cert-manager, Traefik, Prometheus and Loki
 // over a rename.
 type PlatformConfigSpec struct {
-	// PlatformVersion is an informational tag surfaced in the Version printcolumn;
-	// the operator does not branch on it.
+	// PlatformVersion is the version of the base platform config that this is derived from
 	PlatformVersion string `json:"platformVersion,omitempty"`
 	// PlatformSource records where this spec came from
 	PlatformSource          string                         `json:"platformSource,omitempty"`
