@@ -33,6 +33,7 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"encoding/json"
@@ -145,9 +146,18 @@ type socketApi struct {
 
 	logLevelMo bool
 
-	// the patternHandler should only be edited on startup
+	// patternHandler is only ever written during registerPatterns(), which
+	// runs synchronously in NewSocketApi() before Run() spawns any dispatch
+	// goroutine. patternHandlerLock guards that startup-time write; once
+	// dispatch is running the map is read-only, so hot-path reads (see
+	// dispatchClientMessages and ExecuteCommandRequest) intentionally skip it.
+	// patternsFrozen enforces that invariant: Run() sets it before starting
+	// dispatch, and AddPatternHandlerForClient asserts against it, so a
+	// handler registered too late fails fast instead of silently depending on
+	// the lock-free reads below being safe.
 	patternHandlerLock    sync.RWMutex
 	patternHandler        map[string]PatternHandler
+	patternsFrozen        atomic.Bool
 	httpService           HttpService
 	streamService         StreamService
 	apiService            Api
@@ -242,6 +252,7 @@ func (self *socketApi) Run() {
 	assert.Assert(self.streamService != nil)
 
 	self.AssertPatternsUnique()
+	self.patternsFrozen.Store(true)
 	self.startMessageHandler()
 
 	self.statusLock.Lock()
@@ -390,6 +401,7 @@ func (self *socketApi) AddPatternHandlerForClient(
 ) {
 	assert.Assert(config.RequestSchema != nil, "config.RequestSchema has to be set")
 	assert.Assert(config.ResponseSchema != nil, "config.ResponseSchema has to be set")
+	assert.Assert(!self.patternsFrozen.Load(), "pattern handlers may only be registered before Run() starts dispatching", pattern)
 
 	self.patternHandlerLock.Lock()
 	defer self.patternHandlerLock.Unlock()
@@ -3294,9 +3306,9 @@ func (self *socketApi) startClientReadLoop(client websocket.WebsocketClient) {
 // to a client only serves that one. Exits when jobs is closed.
 func (self *socketApi) dispatchClientMessages(client websocket.WebsocketClient, jobs <-chan structs.Datagram) {
 	for datagram := range jobs {
-		self.patternHandlerLock.RLock()
+		// No lock: patternHandler is read-only by the time dispatch runs, see
+		// the field comment on patternHandlerLock.
 		handler, exists := self.patternHandler[datagram.Pattern]
-		self.patternHandlerLock.RUnlock()
 
 		if exists && (handler.Client == nil || handler.Client == client) {
 			self.handlePatternRequest(datagram, client)
