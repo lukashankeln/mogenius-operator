@@ -3,7 +3,7 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   annotations:
-    controller-gen.kubebuilder.io/version: v0.22.0
+    controller-gen.kubebuilder.io/version: v0.23.0
   name: platformconfigs.mogenius.com
 spec:
   group: mogenius.com
@@ -58,6 +58,15 @@ spec:
               Every field is optional so that the default PlatformConfig the operator
               creates at startup — an empty spec that only carries the GitOps status —
               passes schema validation.
+
+              Each component field follows the same two-state rule (see reconcileComponent
+              and reconcileComponent's "Not declared" check in each platform_*.go file):
+              a nil block means "not mentioned" and leaves whatever is installed alone,
+              while a present block with Enabled:false actively uninstalls the component.
+              This matters because the resource is synced from git with prune enabled, so
+              a renamed or broken file path makes the block disappear — and treating that
+              as enabled:false would tear down cert-manager, Traefik, Prometheus and Loki
+              over a rename.
             properties:
               agentSandboxes:
                 description: |-
@@ -71,6 +80,12 @@ spec:
                   not modelled here yet — it is a cluster/node-specific follow-up.
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -116,6 +131,10 @@ spec:
                     type: object
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply
@@ -124,8 +143,17 @@ spec:
                     type: array
                 type: object
               alloy:
+                description: |-
+                  AlloyConfig installs Grafana Alloy, the agent that ships logs/metrics to
+                  Loki and kube-prometheus-stack.
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -143,6 +171,10 @@ spec:
                     type: boolean
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply
@@ -151,8 +183,17 @@ spec:
                     type: array
                 type: object
               certManager:
+                description: |-
+                  CertManagerConfig installs cert-manager and the Issuers/ClusterIssuers it
+                  should manage alongside it.
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -168,6 +209,9 @@ spec:
                     type: object
                   clusterIssuers:
                     items:
+                      description: |-
+                        ClusterIssuerConfig declares a cert-manager ClusterIssuer (cluster-scoped,
+                        usable by Certificates in any namespace) for cert-manager to create.
                       properties:
                         email:
                           type: string
@@ -189,6 +233,8 @@ spec:
                     type: boolean
                   issuers:
                     items:
+                      description: IssuerConfig declares a cert-manager Issuer (namespace-scoped)
+                        for cert-manager to create.
                       properties:
                         email:
                           type: string
@@ -199,6 +245,9 @@ spec:
                         server:
                           type: string
                         solvers:
+                          description: |-
+                            Solvers are raw cert-manager ACME challenge solver objects (HTTP-01,
+                            DNS-01, …), passed through untyped since their shape varies per solver.
                           items:
                             type: object
                             x-kubernetes-preserve-unknown-fields: true
@@ -211,6 +260,10 @@ spec:
                     type: array
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply
@@ -219,8 +272,17 @@ spec:
                     type: array
                 type: object
               externalDns:
+                description: |-
+                  ExternalDNSConfig installs external-dns, which keeps DNS records in sync
+                  with Services/Ingresses for the given provider.
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -235,12 +297,18 @@ spec:
                         type: string
                     type: object
                   domainFilters:
+                    description: DomainFilters restricts external-dns to managing
+                      only these domains.
                     items:
                       type: string
                     type: array
                   enabled:
                     type: boolean
                   externalSecret:
+                    description: |-
+                      ExternalSecret references the provider API credentials. When its Vault
+                      is empty, the operator falls back to the first vault declared in
+                      spec.externalSecretsOperator.
                     properties:
                       key:
                         type: string
@@ -253,6 +321,10 @@ spec:
                     type: object
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply
@@ -260,14 +332,27 @@ spec:
                       type: object
                     type: array
                   provider:
+                    description: |-
+                      Provider is the DNS provider name external-dns talks to (e.g. "aws",
+                      "cloudflare", "google"). Also used to name the generated provider secret.
                     type: string
                 required:
                 - externalSecret
                 - provider
                 type: object
               externalSecretsOperator:
+                description: |-
+                  ExternalSecretsOperatorConfig installs the External Secrets Operator and
+                  declares the vaults other components' ExternalSecret references resolve
+                  against.
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -285,6 +370,10 @@ spec:
                     type: boolean
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply
@@ -293,6 +382,11 @@ spec:
                     type: array
                   vaults:
                     items:
+                      description: |-
+                        ExternalSecretVault names a backend (e.g. Vault, AWS Secrets Manager) the
+                        External Secrets Operator's SecretStore is created for. Provider holds the
+                        backend-specific connection config as raw JSON, since its shape differs
+                        per vault type.
                       properties:
                         name:
                           type: string
@@ -311,10 +405,24 @@ spec:
                 - vaults
                 type: object
               gitOps:
+                description: |-
+                  GitOpsConfig picks the GitOps engine (ArgoCD xor FluxCD — whichever block
+                  is present decides which engine the operator detects/manages) and the
+                  repositories that engine syncs from. Each engine block still carries its
+                  own Enabled, following the normal component semantics (see
+                  PlatformConfigSpec): present-but-disabled uninstalls it.
                 properties:
                   argocd:
+                    description: ArgoCDInstallConfig installs Argo CD as the GitOps
+                      engine.
                     properties:
                       chart:
+                        description: |-
+                          HelmChartReference overrides where a component's Helm chart is pulled from
+                          and what it's installed as. Every field is optional: an absent field falls
+                          back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                          in componentSpec), so this only needs to be set to pin a version or point at
+                          a mirror.
                         properties:
                           chart:
                             type: string
@@ -332,6 +440,10 @@ spec:
                         type: boolean
                       patches:
                         items:
+                          description: |-
+                            PlatformConfigPatchReference names a PlatformPatch resource (see
+                            type_platform_patch.go) applied on top of a component's generated chart
+                            values/objects, for overrides this CRD has no dedicated field for.
                           properties:
                             name:
                               description: name of the PlatformPatch resource to apply
@@ -339,11 +451,21 @@ spec:
                           type: object
                         type: array
                       project:
+                        description: |-
+                          Project is the Argo CD AppProject name components are deployed into.
+                          Falls back to the operator's default project when empty.
                         type: string
                     type: object
                   fluxcd:
+                    description: FluxCDInstallConfig installs Flux as the GitOps engine.
                     properties:
                       chart:
+                        description: |-
+                          HelmChartReference overrides where a component's Helm chart is pulled from
+                          and what it's installed as. Every field is optional: an absent field falls
+                          back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                          in componentSpec), so this only needs to be set to pin a version or point at
+                          a mirror.
                         properties:
                           chart:
                             type: string
@@ -361,6 +483,10 @@ spec:
                         type: boolean
                       patches:
                         items:
+                          description: |-
+                            PlatformConfigPatchReference names a PlatformPatch resource (see
+                            type_platform_patch.go) applied on top of a component's generated chart
+                            values/objects, for overrides this CRD has no dedicated field for.
                           properties:
                             name:
                               description: name of the PlatformPatch resource to apply
@@ -372,6 +498,10 @@ spec:
                     items:
                       properties:
                         externalSecret:
+                          description: |-
+                            ExternalSecret points at one secret inside a vault declared in
+                            spec.externalSecretsOperator.vaults. Vault may be left empty by the caller
+                            and defaulted to the first declared vault (see e.g. ExternalDNSConfig).
                           properties:
                             key:
                               type: string
@@ -429,6 +559,10 @@ spec:
                                 the operator will automatically create the externalsecret for you in the mogenius-operator`s namespace.
                               properties:
                                 externalSecret:
+                                  description: |-
+                                    ExternalSecret points at one secret inside a vault declared in
+                                    spec.externalSecretsOperator.vaults. Vault may be left empty by the caller
+                                    and defaulted to the first declared vault (see e.g. ExternalDNSConfig).
                                   properties:
                                     key:
                                       type: string
@@ -440,6 +574,9 @@ spec:
                                   - path
                                   type: object
                                 secret:
+                                  description: |-
+                                    SecretReference points at a Secret already present in the
+                                    mogenius-operator's namespace.
                                   properties:
                                     key:
                                       description: Key of the Secret data to reference.
@@ -458,8 +595,17 @@ spec:
                     type: array
                 type: object
               kubePrometheusStack:
+                description: |-
+                  KubePrometheusStackConfig installs the kube-prometheus-stack chart
+                  (Prometheus, Alertmanager and Grafana).
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -477,6 +623,10 @@ spec:
                     type: boolean
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply
@@ -485,8 +635,15 @@ spec:
                     type: array
                 type: object
               loki:
+                description: LokiConfig installs Loki for log aggregation.
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -504,6 +661,10 @@ spec:
                     type: boolean
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply
@@ -512,12 +673,25 @@ spec:
                     type: array
                 type: object
               platformSource:
+                description: PlatformSource records where this spec came from
                 type: string
               platformVersion:
+                description: |-
+                  PlatformVersion is an informational tag surfaced in the Version printcolumn;
+                  the operator does not branch on it.
                 type: string
               renovateOperator:
+                description: |-
+                  RenovateOperatorConfig installs renovate-operator, which runs a RenovateJob
+                  per declared repository to keep dependency manifests up to date.
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -534,9 +708,14 @@ spec:
                   enabled:
                     type: boolean
                   maxParallelJobs:
+                    description: MaxParallelJobs caps how many RenovateJobs run concurrently.
                     type: integer
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply
@@ -547,6 +726,10 @@ spec:
                     items:
                       properties:
                         externalSecret:
+                          description: |-
+                            ExternalSecret points at one secret inside a vault declared in
+                            spec.externalSecretsOperator.vaults. Vault may be left empty by the caller
+                            and defaulted to the first declared vault (see e.g. ExternalDNSConfig).
                           properties:
                             key:
                               type: string
@@ -571,6 +754,10 @@ spec:
                             to the gitOpsRepository name when set.
                           type: string
                         provider:
+                          description: |-
+                            RenovateProvider names the SCM provider a RenovateJob discovers repositories
+                            on (e.g. "github", "gitlab", "gitea") and, for self-hosted instances, the
+                            API endpoint to use instead of the provider's public default.
                           properties:
                             endpoint:
                               type: string
@@ -587,8 +774,16 @@ spec:
                     type: array
                 type: object
               traefik:
+                description: TraefikConfig installs Traefik as the cluster's ingress
+                  controller.
                 properties:
                   chart:
+                    description: |-
+                      HelmChartReference overrides where a component's Helm chart is pulled from
+                      and what it's installed as. Every field is optional: an absent field falls
+                      back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+                      in componentSpec), so this only needs to be set to pin a version or point at
+                      a mirror.
                     properties:
                       chart:
                         type: string
@@ -606,6 +801,10 @@ spec:
                     type: boolean
                   patches:
                     items:
+                      description: |-
+                        PlatformConfigPatchReference names a PlatformPatch resource (see
+                        type_platform_patch.go) applied on top of a component's generated chart
+                        values/objects, for overrides this CRD has no dedicated field for.
                       properties:
                         name:
                           description: name of the PlatformPatch resource to apply

@@ -45,8 +45,20 @@ type PlatformConfig struct {
 // Every field is optional so that the default PlatformConfig the operator
 // creates at startup — an empty spec that only carries the GitOps status —
 // passes schema validation.
+//
+// Each component field follows the same two-state rule (see reconcileComponent
+// and reconcileComponent's "Not declared" check in each platform_*.go file):
+// a nil block means "not mentioned" and leaves whatever is installed alone,
+// while a present block with Enabled:false actively uninstalls the component.
+// This matters because the resource is synced from git with prune enabled, so
+// a renamed or broken file path makes the block disappear — and treating that
+// as enabled:false would tear down cert-manager, Traefik, Prometheus and Loki
+// over a rename.
 type PlatformConfigSpec struct {
-	PlatformVersion         string                         `json:"platformVersion,omitempty"`
+	// PlatformVersion is an informational tag surfaced in the Version printcolumn;
+	// the operator does not branch on it.
+	PlatformVersion string `json:"platformVersion,omitempty"`
+	// PlatformSource records where this spec came from
 	PlatformSource          string                         `json:"platformSource,omitempty"`
 	GitOps                  *GitOpsConfig                  `json:"gitOps,omitempty"`
 	CertManager             *CertManagerConfig             `json:"certManager,omitempty"`
@@ -59,6 +71,12 @@ type PlatformConfigSpec struct {
 	ExternalSecretsOperator *ExternalSecretsOperatorConfig `json:"externalSecretsOperator,omitempty"`
 	AgentSandboxes          *AgentSandboxesConfig          `json:"agentSandboxes,omitempty"`
 }
+
+// GitOpsConfig picks the GitOps engine (ArgoCD xor FluxCD — whichever block
+// is present decides which engine the operator detects/manages) and the
+// repositories that engine syncs from. Each engine block still carries its
+// own Enabled, following the normal component semantics (see
+// PlatformConfigSpec): present-but-disabled uninstalls it.
 type GitOpsConfig struct {
 	ArgoCD       *ArgoCDInstallConfig     `json:"argocd,omitempty"`
 	FluxCD       *FluxCDInstallConfig     `json:"fluxcd,omitempty"`
@@ -126,6 +144,8 @@ type GitOpsWriteConfig struct {
 	Provider string `json:"provider,omitempty"`
 }
 
+// SecretReference points at a Secret already present in the
+// mogenius-operator's namespace.
 type SecretReference struct {
 	// Name of the Secret resource to reference.
 	Name string `json:"name,omitempty"`
@@ -133,25 +153,33 @@ type SecretReference struct {
 	Key string `json:"key,omitempty"`
 }
 
+// GenericSecretReference picks exactly one source for a credential: a plain
+// in-cluster Secret, or an ExternalSecret the operator materializes into one.
 // +kubebuilder:validation:OneOf=secret;externalSecret
 type GenericSecretReference struct {
 	Secret         *SecretReference `json:"secret,omitempty"`
 	ExternalSecret *ExternalSecret  `json:"externalSecret,omitempty"`
 }
 
+// ArgoCDInstallConfig installs Argo CD as the GitOps engine.
 type ArgoCDInstallConfig struct {
 	Enabled bool                           `json:"enabled,omitempty"`
 	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
 	Chart   *HelmChartReference            `json:"chart,omitempty"`
-	Project string                         `json:"project,omitempty"`
+	// Project is the Argo CD AppProject name components are deployed into.
+	// Falls back to the operator's default project when empty.
+	Project string `json:"project,omitempty"`
 }
 
+// FluxCDInstallConfig installs Flux as the GitOps engine.
 type FluxCDInstallConfig struct {
 	Enabled bool                           `json:"enabled,omitempty"`
 	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
 	Chart   *HelmChartReference            `json:"chart,omitempty"`
 }
 
+// CertManagerConfig installs cert-manager and the Issuers/ClusterIssuers it
+// should manage alongside it.
 type CertManagerConfig struct {
 	Enabled        bool                           `json:"enabled,omitempty"`
 	Issuers        []IssuerConfig                 `json:"issuers,omitempty"`
@@ -160,6 +188,7 @@ type CertManagerConfig struct {
 	Chart          *HelmChartReference            `json:"chart,omitempty"`
 }
 
+// TraefikConfig installs Traefik as the cluster's ingress controller.
 type TraefikConfig struct {
 	Enabled bool                           `json:"enabled,omitempty"`
 	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
@@ -167,27 +196,40 @@ type TraefikConfig struct {
 	Service *runtime.RawExtension          `json:"service,omitempty"`
 }
 
+// ExternalDNSConfig installs external-dns, which keeps DNS records in sync
+// with Services/Ingresses for the given provider.
 type ExternalDNSConfig struct {
-	Enabled        bool                           `json:"enabled,omitempty"`
-	Patches        []PlatformConfigPatchReference `json:"patches,omitempty"`
-	Chart          *HelmChartReference            `json:"chart,omitempty"`
-	Provider       string                         `json:"provider"`
-	DomainFilters  []string                       `json:"domainFilters,omitempty"`
-	ExternalSecret ExternalSecret                 `json:"externalSecret"`
+	Enabled bool                           `json:"enabled,omitempty"`
+	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
+	Chart   *HelmChartReference            `json:"chart,omitempty"`
+	// Provider is the DNS provider name external-dns talks to (e.g. "aws",
+	// "cloudflare", "google"). Also used to name the generated provider secret.
+	Provider string `json:"provider"`
+	// DomainFilters restricts external-dns to managing only these domains.
+	DomainFilters []string `json:"domainFilters,omitempty"`
+	// ExternalSecret references the provider API credentials. When its Vault
+	// is empty, the operator falls back to the first vault declared in
+	// spec.externalSecretsOperator.
+	ExternalSecret ExternalSecret `json:"externalSecret"`
 }
 
+// KubePrometheusStackConfig installs the kube-prometheus-stack chart
+// (Prometheus, Alertmanager and Grafana).
 type KubePrometheusStackConfig struct {
 	Enabled bool                           `json:"enabled,omitempty"`
 	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
 	Chart   *HelmChartReference            `json:"chart,omitempty"`
 }
 
+// LokiConfig installs Loki for log aggregation.
 type LokiConfig struct {
 	Enabled bool                           `json:"enabled,omitempty"`
 	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
 	Chart   *HelmChartReference            `json:"chart,omitempty"`
 }
 
+// AlloyConfig installs Grafana Alloy, the agent that ships logs/metrics to
+// Loki and kube-prometheus-stack.
 type AlloyConfig struct {
 	Enabled bool                           `json:"enabled,omitempty"`
 	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
@@ -233,12 +275,15 @@ type AgentSandboxNetworkPolicyConfig struct {
 	AdditionalBlockedCidrs []string `json:"additionalBlockedCidrs,omitempty"`
 }
 
+// RenovateOperatorConfig installs renovate-operator, which runs a RenovateJob
+// per declared repository to keep dependency manifests up to date.
 type RenovateOperatorConfig struct {
-	Enabled         bool                           `json:"enabled,omitempty"`
-	Patches         []PlatformConfigPatchReference `json:"patches,omitempty"`
-	Chart           *HelmChartReference            `json:"chart,omitempty"`
-	MaxParallelJobs int                            `json:"maxParallelJobs,omitempty"`
-	Repositories    []RenovateJobConfig            `json:"repositories,omitempty"`
+	Enabled bool                           `json:"enabled,omitempty"`
+	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
+	Chart   *HelmChartReference            `json:"chart,omitempty"`
+	// MaxParallelJobs caps how many RenovateJobs run concurrently.
+	MaxParallelJobs int                 `json:"maxParallelJobs,omitempty"`
+	Repositories    []RenovateJobConfig `json:"repositories,omitempty"`
 }
 
 type RenovateJobConfig struct {
@@ -254,11 +299,17 @@ type RenovateJobConfig struct {
 	ExternalSecret *ExternalSecret  `json:"externalSecret,omitempty"`
 }
 
+// RenovateProvider names the SCM provider a RenovateJob discovers repositories
+// on (e.g. "github", "gitlab", "gitea") and, for self-hosted instances, the
+// API endpoint to use instead of the provider's public default.
 type RenovateProvider struct {
 	Name     string `json:"name"`
 	Endpoint string `json:"endpoint,omitempty"`
 }
 
+// ExternalSecretsOperatorConfig installs the External Secrets Operator and
+// declares the vaults other components' ExternalSecret references resolve
+// against.
 type ExternalSecretsOperatorConfig struct {
 	Enabled bool                           `json:"enabled,omitempty"`
 	Patches []PlatformConfigPatchReference `json:"patches,omitempty"`
@@ -266,26 +317,38 @@ type ExternalSecretsOperatorConfig struct {
 	Vaults  []ExternalSecretVault          `json:"vaults"`
 }
 
+// ExternalSecretVault names a backend (e.g. Vault, AWS Secrets Manager) the
+// External Secrets Operator's SecretStore is created for. Provider holds the
+// backend-specific connection config as raw JSON, since its shape differs
+// per vault type.
 type ExternalSecretVault struct {
 	Name     string               `json:"name"`
 	Type     string               `json:"type"`
 	Provider runtime.RawExtension `json:"provider"`
 }
 
+// ExternalSecret points at one secret inside a vault declared in
+// spec.externalSecretsOperator.vaults. Vault may be left empty by the caller
+// and defaulted to the first declared vault (see e.g. ExternalDNSConfig).
 type ExternalSecret struct {
 	Vault string `json:"vault,omitempty"`
 	Path  string `json:"path"`
 	Key   string `json:"key,omitempty"`
 }
 
+// IssuerConfig declares a cert-manager Issuer (namespace-scoped) for cert-manager to create.
 type IssuerConfig struct {
-	Name      string                 `json:"name"`
-	Email     string                 `json:"email"`
-	Namespace string                 `json:"namespace"`
-	Server    string                 `json:"server,omitempty"`
-	Solvers   []runtime.RawExtension `json:"solvers,omitempty"`
+	Name      string `json:"name"`
+	Email     string `json:"email"`
+	Namespace string `json:"namespace"`
+	Server    string `json:"server,omitempty"`
+	// Solvers are raw cert-manager ACME challenge solver objects (HTTP-01,
+	// DNS-01, …), passed through untyped since their shape varies per solver.
+	Solvers []runtime.RawExtension `json:"solvers,omitempty"`
 }
 
+// ClusterIssuerConfig declares a cert-manager ClusterIssuer (cluster-scoped,
+// usable by Certificates in any namespace) for cert-manager to create.
 type ClusterIssuerConfig struct {
 	Name    string                 `json:"name"`
 	Email   string                 `json:"email"`
@@ -301,11 +364,19 @@ type CertManagerHTTP01Config struct {
 	IngressAnnotations map[string]string `json:"ingressAnnotations,omitempty"`
 }
 
+// PlatformConfigPatchReference names a PlatformPatch resource (see
+// type_platform_patch.go) applied on top of a component's generated chart
+// values/objects, for overrides this CRD has no dedicated field for.
 type PlatformConfigPatchReference struct {
 	// name of the PlatformPatch resource to apply
 	Name string `json:"name,omitempty"`
 }
 
+// HelmChartReference overrides where a component's Helm chart is pulled from
+// and what it's installed as. Every field is optional: an absent field falls
+// back to the component's hardcoded default (see e.g. defaultChart/defaultRepo
+// in componentSpec), so this only needs to be set to pin a version or point at
+// a mirror.
 type HelmChartReference struct {
 	// name of the HelmRelease resource to apply
 	Name       string `json:"name,omitempty"`
