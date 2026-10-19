@@ -1,6 +1,7 @@
 package rammonitor
 
 import (
+	"fmt"
 	"log/slog"
 	"mogenius-operator/src/assert"
 	"mogenius-operator/src/config"
@@ -11,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -267,6 +269,16 @@ type ProcPidStatm struct {
 	Dt uint64 `json:"dt"`
 }
 
+// a common statm line is well under 100 bytes; this buffer size is a guess to
+// be *always* larger in *any* environment than what `/proc/$pid/statm` contains.
+// The buffer is pooled: this runs per PID per second and a fresh allocation
+// each time is pure GC churn (mirrors the pattern in cpumonitor.getCpuUsageInfo).
+const statmReadBufSize = 256
+
+var statmReadBufPool = sync.Pool{
+	New: func() any { return make([]byte, statmReadBufSize) },
+}
+
 // read and parse `$procPath/$pid/statm` to read process memory usage information from the kernel
 func getMemoryUsageInfo(procPath string, pid string) (ProcPidStatm, error) {
 	// File Format of `/proc/$pid/statm`
@@ -290,12 +302,25 @@ func getMemoryUsageInfo(procPath string, pid string) (ProcPidStatm, error) {
 	processPath := filepath.Join(procPath, pid)
 	deviceInfoPath := filepath.Join(processPath, "statm")
 
-	data, err := os.ReadFile(deviceInfoPath)
+	f, err := os.Open(deviceInfoPath)
 	if err != nil {
 		return ProcPidStatm{}, err
 	}
+	defer func() { _ = f.Close() }()
 
-	statcontent := strings.Split(strings.TrimSpace(string(data)), " ")
+	data := statmReadBufPool.Get().([]byte)
+	defer statmReadBufPool.Put(data) //nolint:staticcheck // fixed-size slice, no pointer indirection concern
+
+	bytesRead, err := f.Read(data)
+	if err != nil {
+		return ProcPidStatm{}, err
+	}
+	if bytesRead >= statmReadBufSize {
+		return ProcPidStatm{}, fmt.Errorf("buffersize(%d) exhausted while reading File(%s)", statmReadBufSize, deviceInfoPath)
+	}
+
+	// copies into a string, so returning the buffer to the pool is safe
+	statcontent := strings.Fields(string(data[:bytesRead]))
 
 	info := ProcPidStatm{}
 	info.Pid = asUint64(pid)
