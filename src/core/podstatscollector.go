@@ -73,10 +73,10 @@ func (self *podStatsCollector) Run() {
 			for {
 				nodemetrics := self.getRealNodeMetrics()
 
-				currentPods := map[string]v1.Pod{}
 				pods := store.GetPods("*")
-				for _, pod := range pods {
-					currentPods[pod.Name] = pod
+				currentPods := make(map[string]*v1.Pod, len(pods))
+				for i := range pods {
+					currentPods[pods[i].Name] = &pods[i]
 				}
 
 				podsResult, err := self.podStats(nodemetrics, currentPods)
@@ -159,7 +159,7 @@ func (self *podStatsCollector) getRealNodeMetrics() []podstatscollector.NodeMetr
 	return result
 }
 
-func (self *podStatsCollector) podStats(nodemetrics []podstatscollector.NodeMetrics, pods map[string]v1.Pod) ([]structs.PodStats, error) {
+func (self *podStatsCollector) podStats(nodemetrics []podstatscollector.NodeMetrics, pods map[string]*v1.Pod) ([]structs.PodStats, error) {
 	// Pre-build ephemeral storage map for O(1) lookup instead of O(n³) nested loops
 	// Key: "podName:containerName" -> ephemeralStorage in bytes
 	ephemeralStorageMap := make(map[string]int64)
