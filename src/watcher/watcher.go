@@ -124,9 +124,9 @@ type watcher struct {
 	// handlersMu protects the per-resource weighted handler lists used by the
 	// event fan-out. Separate from handlerMapLock to avoid deadlocks between
 	// the Watch registration path and the event delivery path.
-	handlersMu  sync.RWMutex
-	handlers    map[utils.ResourceDescriptor][]*weightedHandler
-	handlerSeq  int
+	handlersMu sync.RWMutex
+	handlers   map[utils.ResourceDescriptor][]*weightedHandler
+	handlerSeq int
 
 	// Shared informer machinery. The previous code built a brand-new
 	// DynamicSharedInformerFactory per Watch() call - so "Shared" in the
@@ -136,6 +136,11 @@ type watcher struct {
 	// One factory backs every Watch now; informers within it are looked
 	// up by GVR (factory.ForResource returns the same instance on repeat
 	// calls).
+	//
+	// The informers' stores hold *compactObject (see transformObject), not
+	// *unstructured.Unstructured. ForResource(gvr).Lister() asserts the
+	// latter and must not be used; read store items through
+	// objectToUnstructured instead.
 	factory dynamicinformer.DynamicSharedInformerFactory
 	// secretFactory is a dedicated factory used only for the Secret GVR. It
 	// carries a field selector that excludes Helm release-history secrets
@@ -256,9 +261,12 @@ func (self *watcher) Watch(resource utils.ResourceDescriptor, weight int, onAdd 
 	// Replay outside all locks.
 	if onAdd != nil {
 		for _, obj := range replay {
-			if u, ok := obj.(*unstructured.Unstructured); ok {
-				onAdd(resource, u)
+			u, err := objectToUnstructured(obj)
+			if err != nil {
+				self.logger.Warn("failed to decode cached object for replay", "resource", resource, "error", err)
+				continue
 			}
+			onAdd(resource, u)
 		}
 	}
 
@@ -371,36 +379,8 @@ func (self *watcher) registerAndStartInformer(gvr schema.GroupVersionResource, r
 	resourceInformer := factory.ForResource(gvr).Informer()
 
 	if !self.informersConfigured[gvr] {
-		// The transform is the only place that may mutate an object: it runs
-		// once, before the object enters the informer cache. Event handlers
-		// receive the cached pointer and share it with every other handler,
-		// with the resync path and with the goroutines that marshal it, so
-		// any write there is a concurrent map write.
-		//
-		// Strip large metadata fields to reduce in-process memory usage.
-		// managedFields (server-side apply tracking) and
-		// last-applied-configuration are never used by event handlers and
-		// can be several KB per object.
-		//
-		// Stamp apiVersion/kind while we are here: Unstructured objects from
-		// the dynamic client frequently arrive with empty TypeMeta, and the
-		// store persists it so cross-kind readers can call GetKind().
 		apiVersion, kind := resource.ApiVersion, resource.Kind
-		if err := resourceInformer.SetTransform(func(obj any) (any, error) {
-			if u, ok := obj.(*unstructured.Unstructured); ok {
-				u.SetManagedFields(nil)
-				annotations := u.GetAnnotations()
-				delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
-				u.SetAnnotations(annotations)
-				if u.GetAPIVersion() == "" {
-					u.SetAPIVersion(apiVersion)
-				}
-				if u.GetKind() == "" {
-					u.SetKind(kind)
-				}
-			}
-			return obj, nil
-		}); err != nil {
+		if err := resourceInformer.SetTransform(self.transformObject(apiVersion, kind)); err != nil {
 			return nil, fmt.Errorf("failed to set transform: %s", err)
 		}
 		if err := resourceInformer.SetWatchErrorHandler(func(r *cache.Reflector, err error) {
@@ -427,6 +407,52 @@ func (self *watcher) registerAndStartInformer(gvr schema.GroupVersionResource, r
 	factory.Start(self.factoryStopCh)
 
 	return resourceInformer, nil
+}
+
+// transformObject returns the informer transform for one resource kind. It is
+// the only place that may mutate an object: it runs once, before the object
+// enters the informer cache.
+//
+// Strip large metadata fields to reduce in-process memory usage.
+// managedFields (server-side apply tracking) and last-applied-configuration
+// are never used by event handlers and can be several KB per object.
+//
+// Stamp apiVersion/kind while we are here: Unstructured objects from the
+// dynamic client frequently arrive with empty TypeMeta, and the store persists
+// it so cross-kind readers can call GetKind().
+//
+// Finally the object is converted to a *compactObject (see its doc) so the
+// cache holds JSON instead of nested maps. Handlers get a freshly decoded
+// object per event, but the no-mutation contract stays: that one decoded
+// object is shared by every handler of the event (and the object
+// subscribers), so a write in any of them is still a concurrent map write.
+// If serialization fails the stripped *Unstructured is cached instead;
+// objectToUnstructured accepts both.
+func (self *watcher) transformObject(apiVersion, kind string) cache.TransformFunc {
+	return func(obj any) (any, error) {
+		u, ok := obj.(*unstructured.Unstructured)
+		if !ok {
+			// Already compact (or an unknown type): nothing to do.
+			return obj, nil
+		}
+		u.SetManagedFields(nil)
+		annotations := u.GetAnnotations()
+		delete(annotations, "kubectl.kubernetes.io/last-applied-configuration")
+		u.SetAnnotations(annotations)
+		if u.GetAPIVersion() == "" {
+			u.SetAPIVersion(apiVersion)
+		}
+		if u.GetKind() == "" {
+			u.SetKind(kind)
+		}
+		compact, err := newCompactObject(u)
+		if err != nil {
+			self.logger.Warn("failed to compact object, caching unstructured form",
+				"apiVersion", apiVersion, "kind", kind, "error", err)
+			return u, nil
+		}
+		return compact, nil
+	}
 }
 
 // factoryForGVR returns the informer factory responsible for the given GVR.
@@ -457,23 +483,11 @@ func (self *watcher) startSingleWatcher(ctx context.Context, resource utils.Reso
 		return err
 	}
 
-	toUnstructured := func(obj any) (*unstructured.Unstructured, bool) {
-		if u, ok := obj.(*unstructured.Unstructured); ok {
-			return u, true
-		}
-		if d, ok := obj.(cache.DeletedFinalStateUnknown); ok {
-			if u, ok := d.Obj.(*unstructured.Unstructured); ok {
-				return u, true
-			}
-		}
-		return nil, false
-	}
-
 	handler, err := resourceInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
-			unstructuredObj, ok := toUnstructured(obj)
-			if !ok {
-				self.logger.Warn("failed to deserialize", "type", fmt.Sprintf("%T", obj))
+			unstructuredObj, err := objectToUnstructured(obj)
+			if err != nil {
+				self.logger.Warn("failed to deserialize", "type", fmt.Sprintf("%T", obj), "error", err)
 				return
 			}
 			self.handlersMu.RLock()
@@ -487,15 +501,20 @@ func (self *watcher) startSingleWatcher(ctx context.Context, resource utils.Reso
 			self.fireObjectSubs(self.objectSubsAdd, unstructuredObj)
 		},
 		UpdateFunc: func(oldObj, newObj any) {
-			oldUnstructuredObj, ok := toUnstructured(oldObj)
-			if !ok {
-				self.logger.Warn("failed to deserialize old object", "type", fmt.Sprintf("%T", oldObj))
+			oldUnstructuredObj, err := objectToUnstructured(oldObj)
+			if err != nil {
+				self.logger.Warn("failed to deserialize old object", "type", fmt.Sprintf("%T", oldObj), "error", err)
 				return
 			}
-			newUnstructuredObj, ok := toUnstructured(newObj)
-			if !ok {
-				self.logger.Warn("failed to deserialize new object", "type", fmt.Sprintf("%T", newObj))
-				return
+			// A resync passes the identical cached object as old and new:
+			// decode it once and share it.
+			newUnstructuredObj := oldUnstructuredObj
+			if !sameObject(oldObj, newObj) {
+				newUnstructuredObj, err = objectToUnstructured(newObj)
+				if err != nil {
+					self.logger.Warn("failed to deserialize new object", "type", fmt.Sprintf("%T", newObj), "error", err)
+					return
+				}
 			}
 			// Always invoke all onUpdate callbacks, even on resync (same
 			// resourceVersion) - the store-write handler needs the resync to
@@ -517,9 +536,9 @@ func (self *watcher) startSingleWatcher(ctx context.Context, resource utils.Reso
 			self.fireObjectSubs(self.objectSubsUpdate, newUnstructuredObj)
 		},
 		DeleteFunc: func(obj any) {
-			unstructuredObj, ok := toUnstructured(obj)
-			if !ok {
-				self.logger.Warn("failed to deserialize", "type", fmt.Sprintf("%T", obj))
+			unstructuredObj, err := objectToUnstructured(obj)
+			if err != nil {
+				self.logger.Warn("failed to deserialize", "type", fmt.Sprintf("%T", obj), "error", err)
 				return
 			}
 			self.handlersMu.RLock()
