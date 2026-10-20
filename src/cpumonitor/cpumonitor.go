@@ -616,7 +616,10 @@ func getCpuUsageInfo(procPath string, pid string) (ProcPidStat, error) {
 	// =============
 	//
 	// - values are separated by spaces
-	// - between '(' and ')' can be additional spaces which belong to the same value
+	// - the comm value starts at the first '(' and ends at the LAST ')' of the line
+	//   (everything in between, including spaces, belongs to the comm value)
+	// - comm is controlled by the process itself and may contain ") " or other
+	//   parentheses, so the closing ')' cannot be found by toggling on the first one
 
 	processPath := filepath.Join(procPath, pid)
 	deviceInfoPath := filepath.Join(processPath, "stat")
@@ -649,46 +652,45 @@ func getCpuUsageInfo(procPath string, pid string) (ProcPidStat, error) {
 
 	// only fields up to index 21 (Starttime) are used; stop parsing early
 	const lastNeededField = 21
+	open := strings.IndexByte(statcontent, '(')
+	closeIdx := strings.LastIndexByte(statcontent, ')')
+	if open < 0 || closeIdx < 0 || closeIdx < open {
+		return ProcPidStat{}, fmt.Errorf("malformed stat content in File(%s): comm not enclosed in parentheses", deviceInfoPath)
+	}
+	rest := strings.Fields(statcontent[closeIdx+1:])
 	dataPieces := make([]string, 0, lastNeededField+1)
-	elementIdx := 0
-	stringCapture := false
-	var builder strings.Builder
-	for _, charRune := range statcontent {
-		if charRune == ' ' && !stringCapture {
-			dataPieces = append(dataPieces, builder.String())
-			builder.Reset()
-			elementIdx++
-			if elementIdx > lastNeededField {
-				break
-			}
-			continue
+	dataPieces = append(dataPieces, strings.TrimSpace(statcontent[:open]), statcontent[open:closeIdx+1])
+	for _, piece := range rest {
+		if len(dataPieces) > lastNeededField {
+			break
 		}
-		switch charRune {
-		case '(':
-			stringCapture = true
-		case ')':
-			stringCapture = false
-		}
-		builder.WriteRune(charRune)
+		dataPieces = append(dataPieces, piece)
 	}
-	if elementIdx <= lastNeededField {
-		dataPieces = append(dataPieces, builder.String())
+	if len(dataPieces) <= lastNeededField {
+		return ProcPidStat{}, fmt.Errorf("malformed stat content in File(%s): expected at least %d fields, got %d", deviceInfoPath, lastNeededField+1, len(dataPieces))
 	}
 
-	asInt64 := func(val string) int64 {
+	asInt64 := func(name string, val string) (int64, error) {
 		intval, err := strconv.ParseInt(val, 10, 64)
-		assert.Assert(err == nil, "val is expected to be an int64", val, err)
-		return intval
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse %s %q as int64 in File(%s): %w", name, val, deviceInfoPath, err)
+		}
+		return intval, nil
 	}
 
-	asUint64 := func(val string) uint64 {
+	asUint64 := func(name string, val string) (uint64, error) {
 		intval, err := strconv.ParseUint(val, 10, 64)
-		assert.Assert(err == nil, "val is expected to be an uint64", val, err)
-		return intval
+		if err != nil {
+			return 0, fmt.Errorf("failed to parse %s %q as uint64 in File(%s): %w", name, val, deviceInfoPath, err)
+		}
+		return intval, nil
 	}
 
 	info := ProcPidStat{}
-	info.Pid = asInt64(dataPieces[0])
+	info.Pid, err = asInt64("pid", dataPieces[0])
+	if err != nil {
+		return ProcPidStat{}, err
+	}
 	info.Comm = dataPieces[1]
 	// info.State = dataPieces[2]
 	// info.Ppid = asInt64(dataPieces[3])
@@ -701,15 +703,30 @@ func getCpuUsageInfo(procPath string, pid string) (ProcPidStat, error) {
 	// info.Cminflt = asUint64(dataPieces[10])
 	// info.Majflt = asUint64(dataPieces[11])
 	// info.Cmajflt = asUint64(dataPieces[12])
-	info.Utime = asUint64(dataPieces[13])
-	info.Stime = asUint64(dataPieces[14])
-	info.Cutime = asUint64(dataPieces[15])
-	info.Cstime = asUint64(dataPieces[16])
+	info.Utime, err = asUint64("utime", dataPieces[13])
+	if err != nil {
+		return ProcPidStat{}, err
+	}
+	info.Stime, err = asUint64("stime", dataPieces[14])
+	if err != nil {
+		return ProcPidStat{}, err
+	}
+	info.Cutime, err = asUint64("cutime", dataPieces[15])
+	if err != nil {
+		return ProcPidStat{}, err
+	}
+	info.Cstime, err = asUint64("cstime", dataPieces[16])
+	if err != nil {
+		return ProcPidStat{}, err
+	}
 	// info.Priority = asInt64(dataPieces[17])
 	// info.Nice = asInt64(dataPieces[18])
 	// info.NumThreads = asInt64(dataPieces[19])
 	// info.Itrealvalue = asInt64(dataPieces[20])
-	info.Starttime = asUint64(dataPieces[21])
+	info.Starttime, err = asUint64("starttime", dataPieces[21])
+	if err != nil {
+		return ProcPidStat{}, err
+	}
 	// info.Vsize = asUint64(dataPieces[22])
 	// info.Rss = asInt64(dataPieces[23])
 	// info.Rsslim = asUint64(dataPieces[24])
