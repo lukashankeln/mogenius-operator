@@ -1,5 +1,55 @@
 # Changelog
 
+## [2.32.0](https://github.com/mogenius/mogenius-operator/compare/v2.31.1...v2.32.0) (2026-10-20)
+
+
+### Features
+
+* stop idle agent sandboxes after their auto-stop interval ([7b51c40](https://github.com/mogenius/mogenius-operator/commit/7b51c403604db6b9e262720c69a5a8201d61fdf3))
+
+
+### Bug Fixes
+
+* check that a tunnel's pod still runs and move the tunnel when it is gone ([ce5de3c](https://github.com/mogenius/mogenius-operator/commit/ce5de3c3b362147bee061bb874bd5d83768e05fd))
+* cluster wide audit log is not getting displayed ([fe884ff](https://github.com/mogenius/mogenius-operator/commit/fe884ff8d37ab29ecd4ba6fa2c9ef380cdc8d968))
+* cluster wide autit log is not getting returned ([1e38e5e](https://github.com/mogenius/mogenius-operator/commit/1e38e5e72b5587c8765ce7f186fbe66995473ded))
+* **cpumonitor:** parse pid stat comm up to the last ')' ([0c9a36f](https://github.com/mogenius/mogenius-operator/commit/0c9a36f860d2428f7f49e58abe0a5c41338b1985))
+* **cpumonitor:** parse pid stat comm up to the last ')' ([701facf](https://github.com/mogenius/mogenius-operator/commit/701facfeabd99027847fafafbc1841f394585671))
+* **deps:** update module github.com/anthropics/anthropic-sdk-go to v1.82.0 ([#1336](https://github.com/mogenius/mogenius-operator/issues/1336)) ([dbfd334](https://github.com/mogenius/mogenius-operator/commit/dbfd33437162db0777d9e6eedb3a59396881451a))
+* **deps:** update module github.com/ollama/ollama to v0.40.5 ([#1333](https://github.com/mogenius/mogenius-operator/issues/1333)) ([0e6fb95](https://github.com/mogenius/mogenius-operator/commit/0e6fb952b34b4b006234fe5c10e6b16295618472))
+* **deps:** update module github.com/ollama/ollama to v0.40.6 ([#1337](https://github.com/mogenius/mogenius-operator/issues/1337)) ([31432bf](https://github.com/mogenius/mogenius-operator/commit/31432bfd6588e4e47b9c54c826d0328d5b486b7f))
+* **deps:** update module github.com/openai/openai-go/v3 to v3.77.0 ([4235bd5](https://github.com/mogenius/mogenius-operator/commit/4235bd54d41efc98fa0912ada80e322c217f4bd4))
+* **deps:** update module github.com/openai/openai-go/v3 to v3.77.0 ([13a25c4](https://github.com/mogenius/mogenius-operator/commit/13a25c4aef2db9aaedd4faa9385bd9d08e06468d))
+* **deps:** update module github.com/openai/openai-go/v3 to v3.78.0 ([#1329](https://github.com/mogenius/mogenius-operator/issues/1329)) ([2f639b3](https://github.com/mogenius/mogenius-operator/commit/2f639b36d84892645a9a4e8c2283ba5bf953cb59))
+* **deps:** update module github.com/openai/openai-go/v3 to v3.82.0 ([#1346](https://github.com/mogenius/mogenius-operator/issues/1346)) ([ae8fe49](https://github.com/mogenius/mogenius-operator/commit/ae8fe49f9cfa4ef0207bb8691df4407c7c585239))
+* **deps:** update module github.com/valkey-io/valkey-go to v1.0.79 ([#1331](https://github.com/mogenius/mogenius-operator/issues/1331)) ([d2244a0](https://github.com/mogenius/mogenius-operator/commit/d2244a0514cd4ed156a9f15c90c907ace4c32d11))
+* **deps:** update module helm.sh/helm/v4 to v4.3.1 ([#1330](https://github.com/mogenius/mogenius-operator/issues/1330)) ([e831505](https://github.com/mogenius/mogenius-operator/commit/e83150552ab07b24ed6822c0d69e7e51ce587332))
+* improve comment for platform version ([20a4247](https://github.com/mogenius/mogenius-operator/commit/20a42478dcefbbb05c6ce3809b8d128f03643b13))
+* node-metrics reads /proc/$pid/stat only for reported pod containers ([909d358](https://github.com/mogenius/mogenius-operator/commit/909d358d97ab53bb5f0f7e36bf12300af89c3ae3))
+* node-metrics reads /proc/$pid/stat only for reported pod containers ([16aaa36](https://github.com/mogenius/mogenius-operator/commit/16aaa3643d4779a093b7199a2ac3bdb8a2597705))
+* **platformConfig:** adding missing explanatory comments to platform config spec ([7d5623a](https://github.com/mogenius/mogenius-operator/commit/7d5623ae6bb1bed68fe31e29e258730aaaa9336b))
+* re-resolve the target pod and restart the port-forward when a tunnel's pod goes away ([4d14159](https://github.com/mogenius/mogenius-operator/commit/4d141591441afe293ab65bb9d7f428e2bad18fc7))
+* redact the env of exec and session requests in the audit log und feat: env on pod sessions; deleting a session stops its running command ([f9dad98](https://github.com/mogenius/mogenius-operator/commit/f9dad9814c08b72348613dec45738768b12c24c0))
+* session commands keep 16 MiB of output (MO_SESSION_COMMAND_MAX_OUTPUT_BYTES) and report truncated ([3263790](https://github.com/mogenius/mogenius-operator/commit/3263790f17dddcb29613e35ba1f4a18cf07fd454))
+
+
+### Performance Improvements
+
+* **core:** pipeline GetMachineStatsForNodes/ReplaceCniData instead of N sequential calls ([9083d81](https://github.com/mogenius/mogenius-operator/commit/9083d81ca11a8a5b89c413b5fb6d0978d9a80cfc))
+* general socket api performance improvements ([23d489d](https://github.com/mogenius/mogenius-operator/commit/23d489d35b5e1a6cc39bc21cc61651cc6973e619))
+* **kubernetes:** gate add-event suppression on real store readiness, not a fixed 10s window ([737d089](https://github.com/mogenius/mogenius-operator/commit/737d089e9c9d8c604895d56929e96db955af2215))
+* **kubernetes:** index pods/replicasets/jobs by owner UID in GetWorkloadStatusItems ([b8e427b](https://github.com/mogenius/mogenius-operator/commit/b8e427b3cb80e3ab712306955a3cb66e3c0e18de))
+* **monitor:** avoid redundant container-enumerator round trip ([ecc54e8](https://github.com/mogenius/mogenius-operator/commit/ecc54e8485c267804da70fc24920d4e3c6a020b3))
+* multiple performance improvements to metric collection ([05c947d](https://github.com/mogenius/mogenius-operator/commit/05c947d7e96d259023e0757154cea233a03901c1))
+* **networkmonitor:** drop unnecessary sort in metricsToPodstats ([e6796f4](https://github.com/mogenius/mogenius-operator/commit/e6796f4e0a83245f895e1a316563b5e256f5efb6))
+* **podstatscollector:** avoid double struct copy of v1.Pod ([25d183c](https://github.com/mogenius/mogenius-operator/commit/25d183ceed9fa699af06c89f2331feb5a33414d8))
+* **rammonitor:** pool the /proc/pid/statm read buffer ([d9fb6e2](https://github.com/mogenius/mogenius-operator/commit/d9fb6e22df6655942e3766326f44e274d1537bff))
+* **socketapi:** avoid redundant pattern handler lookup per message ([f3aec59](https://github.com/mogenius/mogenius-operator/commit/f3aec59324c53456171a011b2ae2418442fe8fb6))
+* **socketapi:** drop hot-path lock on read-only pattern handler map ([b7255d6](https://github.com/mogenius/mogenius-operator/commit/b7255d66a54952bc3b3f3bd4780c7e5b0ffe78cb))
+* **store:** batch per-shard ZCARD/ZRANGE calls in GetResourcesByWhitelistPaginated ([7e642dd](https://github.com/mogenius/mogenius-operator/commit/7e642dd61317d768ca881002cc9dadaca71adb47))
+* **store:** fast-path cluster-wide audit log pages instead of scanning the whole index ([146c70f](https://github.com/mogenius/mogenius-operator/commit/146c70ffa36c93570b9c753fde46539eb0e5a6e1))
+* **valkeyclient:** use server-side MATCH in DeleteMultiple instead of full keyspace scan ([478e4c6](https://github.com/mogenius/mogenius-operator/commit/478e4c6f23cdbc6d45eb7bca497ce11f538a61d4))
+
 ## [2.31.1](https://github.com/mogenius/mogenius-operator/compare/v2.31.0...v2.31.1) (2026-10-13)
 
 
