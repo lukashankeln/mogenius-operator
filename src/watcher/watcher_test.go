@@ -172,9 +172,9 @@ func TestWatch_EndToEndDeliversDecodedObjectsFromCompactStore(t *testing.T) {
 	require.NoError(t, w.Unwatch(res))
 }
 
-// Resync passes the identical cached pointer as old and new; the handlers
-// must still get decoded objects, sharing one decode.
-func TestObjectToUnstructured_ResyncSamePointerIsDetected(t *testing.T) {
+// Resync passes the identical cached pointer as old and new; sameObject is
+// what lets UpdateFunc decode it only once.
+func TestSameObject_DetectsResyncPointer(t *testing.T) {
 	p := testPod("p", "ns", "1")
 	p.SetAPIVersion("v1")
 	p.SetKind("Pod")

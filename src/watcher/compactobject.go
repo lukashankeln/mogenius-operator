@@ -64,7 +64,7 @@ func (c *compactObject) DeepCopyObject() runtime.Object {
 		return nil
 	}
 	return &compactObject{
-		ObjectMeta: *c.ObjectMeta.DeepCopy(),
+		ObjectMeta: *c.DeepCopy(),
 		raw:        c.raw,
 	}
 }

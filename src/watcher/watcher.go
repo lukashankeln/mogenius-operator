@@ -427,7 +427,8 @@ func (self *watcher) registerAndStartInformer(gvr schema.GroupVersionResource, r
 // object is shared by every handler of the event (and the object
 // subscribers), so a write in any of them is still a concurrent map write.
 // If serialization fails the stripped *Unstructured is cached instead;
-// objectToUnstructured accepts both.
+// objectToUnstructured accepts both, and for that fallback handlers get the
+// cached pointer itself (as before compaction), not a fresh decode.
 func (self *watcher) transformObject(apiVersion, kind string) cache.TransformFunc {
 	return func(obj any) (any, error) {
 		u, ok := obj.(*unstructured.Unstructured)
