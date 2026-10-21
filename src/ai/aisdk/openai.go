@@ -12,6 +12,12 @@ import (
 // OpenAIProvider wraps the OpenAI SDK behind the Provider interface.
 type OpenAIProvider struct {
 	client *openai.Client
+	// useResponsesAPI routes Chat/ChatStream through /v1/responses instead of
+	// /v1/chat/completions. Enabled for the official OpenAI endpoint (empty
+	// baseURL), where it is required for GPT-5-family reasoning models to use
+	// function tools. Disabled for custom baseURL endpoints (Azure, LiteLLM,
+	// vLLM, proxies), which may only implement /v1/chat/completions.
+	useResponsesAPI bool
 }
 
 var _ Provider = (*OpenAIProvider)(nil)
@@ -24,7 +30,7 @@ func NewOpenAIProvider(apiKey, baseURL string) *OpenAIProvider {
 		opts = append(opts, option.WithBaseURL(baseURL))
 	}
 	client := openai.NewClient(opts...)
-	return &OpenAIProvider{client: &client}
+	return &OpenAIProvider{client: &client, useResponsesAPI: baseURL == ""}
 }
 
 func toolsToOpenAI(tools []Tool) []openai.ChatCompletionToolUnionParam {
@@ -98,6 +104,9 @@ func toOpenAIMessages(messages []Message) []openai.ChatCompletionMessageParamUni
 }
 
 func (p *OpenAIProvider) Chat(ctx context.Context, model string, messages []Message, tools []Tool) (Response, error) {
+	if p.useResponsesAPI {
+		return p.chatResponses(ctx, model, messages, tools)
+	}
 	params := openai.ChatCompletionNewParams{
 		Model:    model,
 		Messages: toOpenAIMessages(messages),
@@ -134,6 +143,9 @@ func (p *OpenAIProvider) Chat(ctx context.Context, model string, messages []Mess
 }
 
 func (p *OpenAIProvider) ChatStream(ctx context.Context, model string, messages []Message, tools []Tool) (<-chan StreamChunk, error) {
+	if p.useResponsesAPI {
+		return p.chatStreamResponses(ctx, model, messages, tools)
+	}
 	params := openai.ChatCompletionNewParams{
 		Model:    model,
 		Messages: toOpenAIMessages(messages),
