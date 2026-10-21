@@ -86,6 +86,7 @@ func BytesToHumanReadable(b int64) string {
 
 // FillWith pads s with chars up to targetLength runes, or truncates it via TruncateText.
 // Lengths are in runes, not terminal display columns (wide CJK/emoji may still misalign).
+// Invalid UTF-8 bytes in a padded or shortened result become U+FFFD.
 func FillWith(s string, targetLength int, chars string) string {
 	count := utf8.RuneCountInString(s)
 	if count >= targetLength {
@@ -105,6 +106,7 @@ func FillWith(s string, targetLength int, chars string) string {
 
 // TruncateText shortens s to at most max runes, ending in " ..." when max >= 4.
 // Lengths are in runes, not terminal display columns (wide CJK/emoji may still misalign).
+// Invalid UTF-8 bytes in a shortened result become U+FFFD.
 func TruncateText(s string, max int) string {
 	if utf8.RuneCountInString(s) <= max {
 		return s

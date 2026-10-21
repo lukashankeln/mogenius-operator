@@ -18,6 +18,7 @@ func TestTruncateText(t *testing.T) {
 		{"exact fit ascii", "abcdef", 6, "abcdef"},
 		{"shorter than max", "abc", 10, "abc"},
 		{"exact fit multibyte", "äöü", 3, "äöü"},
+		{"exact fit multibyte long", "äöüäöü", 6, "äöüäöü"},
 		{"long ascii", "abcdefghij", 8, "abcd ..."},
 		{"max 4", "abcdefghij", 4, " ..."},
 		{"max 0", "abc", 0, ""},
@@ -27,6 +28,7 @@ func TestTruncateText(t *testing.T) {
 		{"negative", "abc", -5, ""},
 		{"empty input negative", "", -1, ""},
 		{"multibyte", "äöüäöüäöü", 7, "äöü ..."},
+		{"multibyte cut", "äöüäöüäöü", 6, "äö ..."},
 		{"cjk", "你好世界你好世界", 6, "你好 ..."},
 	}
 	for _, tt := range tests {
@@ -41,12 +43,6 @@ func TestTruncateText(t *testing.T) {
 	}
 }
 
-func TestTruncateTextMultibyteLength(t *testing.T) {
-	got := TruncateText("äöüäöüäöü", 6)
-	assert.True(t, utf8.ValidString(got))
-	assert.Equal(t, 6, utf8.RuneCountInString(got))
-}
-
 func TestFillWith(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -56,6 +52,7 @@ func TestFillWith(t *testing.T) {
 		want   string
 	}{
 		{"exact fit", "abc", 3, " ", "abc"},
+		{"exact fit long", "abcdef", 6, " ", "abcdef"},
 		{"pad ascii", "ab", 5, ".", "ab..."},
 		{"pad multibyte by runes", "é", 3, " ", "é  "},
 		{"multi-rune chars cut", "a", 4, "xy", "axyx"},
