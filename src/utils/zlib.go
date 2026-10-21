@@ -3,6 +3,7 @@ package utils
 import (
 	"bytes"
 	"compress/zlib"
+	"fmt"
 	"io"
 
 	"encoding/json"
@@ -38,15 +39,27 @@ func ZlibDecompress(compressedData []byte) ([]byte, error) {
 	return outBuf.Bytes(), nil
 }
 
-// the data variable will be modified in place (inOut-variable)
-func TryZlibDecompress(data any) (any, error) {
+// TryZlibDecompress decodes a zlib-compressed datagram payload. The payload is
+// expected to be the base64 JSON string of the zlib bytes, mirroring how a
+// []byte payload is encoded outbound by encoding/json. The result is the raw
+// decompressed JSON, so it can be used directly as a json.RawMessage payload.
+// An error is returned if the payload is not a base64 string, not valid zlib
+// data, or does not decompress to valid JSON.
+func TryZlibDecompress(data any) (json.RawMessage, error) {
 	dataBytes, err := json.Marshal(data)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to marshal payload: %w", err)
 	}
-	decompressedPayload, err := ZlibDecompress([]byte(dataBytes))
+	var compressed []byte
+	if err := json.Unmarshal(dataBytes, &compressed); err != nil {
+		return nil, fmt.Errorf("payload is not a base64 string: %w", err)
+	}
+	decompressed, err := ZlibDecompress(compressed)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid zlib data: %w", err)
 	}
-	return decompressedPayload, nil
+	if !json.Valid(decompressed) {
+		return nil, fmt.Errorf("decompressed payload is not valid JSON")
+	}
+	return json.RawMessage(decompressed), nil
 }
