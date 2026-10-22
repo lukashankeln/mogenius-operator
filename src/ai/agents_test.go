@@ -242,13 +242,13 @@ func TestAgentTaskVisibleInNamespaces(t *testing.T) {
 			visible: true,
 		},
 		{
-			name: "all-clear report with wildcard scope is visible everywhere",
+			name: "cluster-scoped (wildcard) run is hidden from every workspace",
 			task: AiTask{
-				ID:                 "ai_tasks:Agent:argocd:doctor-run-1",
-				ScopeNamespaces:    []string{"argocd", "development"},
+				ID:                 "ai_tasks:Agent:*:doctor-run-1",
+				ScopeNamespaces:    []string{"*"},
 				ScopeAllNamespaces: true,
 			},
-			visible: true,
+			visible: false,
 		},
 		{
 			name: "all-clear report is visible when the scope overlaps the workspace",
