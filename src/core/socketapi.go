@@ -24,6 +24,7 @@ import (
 	"mogenius-operator/src/store"
 	"mogenius-operator/src/stream"
 	"mogenius-operator/src/structs"
+	"mogenius-operator/src/tlsgateway"
 	"mogenius-operator/src/utils"
 	"mogenius-operator/src/valkeyclient"
 	"mogenius-operator/src/version"
@@ -1427,6 +1428,16 @@ func (self *socketApi) registerPatterns() {
 		func(datagram structs.Datagram, request flux.FluxResourceRequest) (bool, error) {
 			result, err := self.flux.FluxForce(request)
 			return store.AddToAuditLog(datagram, self.logger, result, err, nil, nil)
+		},
+	)
+
+	RegisterPatternHandler(
+		PatternHandle{self, "service/tunnel-certificate"},
+		PatternConfig{},
+		func(datagram structs.Datagram, request stream.TunnelCertificateRequest) (tlsgateway.CertificateStatus, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			return stream.TunnelCertificate(ctx, request)
 		},
 	)
 

@@ -26,6 +26,7 @@ import (
 	"mogenius-operator/src/store"
 	"mogenius-operator/src/stream"
 	"mogenius-operator/src/structs"
+	"mogenius-operator/src/tlsgateway"
 	"mogenius-operator/src/utils"
 	"mogenius-operator/src/valkeyclient"
 	"mogenius-operator/src/watcher"
@@ -177,6 +178,25 @@ func initializeClusterSystems(
 		allowExternalHosts,
 		sshGatewayEnabled,
 	)
+	if selfSigned, _ := configModule.TryGetBool("MO_TUNNEL_TLS_SELF_SIGNED"); selfSigned {
+		base.logger.Warn("end-to-end tunnel domains use self-signed certificates (MO_TUNNEL_TLS_SELF_SIGNED); for development only")
+		stream.SetupTunnelTLS(tlsgateway.NewSelfSigned())
+	} else {
+		acme := tlsgateway.NewACME(
+			logManagerModule.CreateLogger("tunnel-tls"),
+			base.clientProvider.K8sClientSet(),
+			configModule.Get("MO_OWN_NAMESPACE"),
+			tlsgateway.ACMEConfig{
+				Server: configModule.Get("MO_TUNNEL_TLS_ACME_SERVER"),
+				Email:  configModule.Get("MO_TUNNEL_TLS_ACME_EMAIL"),
+				CAFile: configModule.Get("MO_TUNNEL_TLS_ACME_CA_FILE"),
+			},
+		)
+		acmeCtx, stopACME := context.WithCancel(context.Background())
+		go acme.Run(acmeCtx)
+		shutdown.Add(stopACME)
+		stream.SetupTunnelTLS(acme)
+	}
 	if err := sshgateway.Setup(
 		logManagerModule.CreateLogger("ssh-gateway"),
 		base.clientProvider,

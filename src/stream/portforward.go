@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"mogenius-operator/src/sshgateway"
+	"mogenius-operator/src/tlsgateway"
 	"mogenius-operator/src/utils"
 	"net"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -45,6 +47,12 @@ const pfKindHost = "host"
 // resource kind of the target.
 const pfModeSSH = "ssh"
 
+// pfModeTLS serves an end-to-end tunnel domain: each sub-connection carries
+// the browser's TLS, which the in-process TLS gateway ends with a certificate
+// kept in this cluster before it proxies HTTP to the target. The platform's
+// edge only passed the encrypted bytes on.
+const pfModeTLS = "tls"
+
 // pfKindSSH is the pre-mode spelling of the same request, where "ssh" was put
 // in Kind for want of another field. Accepted so clients released before the
 // mode existed keep working; those send the target kind inside WorkloadName
@@ -80,6 +88,35 @@ var pfClientset k8s.Interface
 // rejected — they turn the operator into a proxy into the node's LAN (SSRF).
 var pfAllowExternalHosts bool
 
+// pfTunnelCertificates are the certificates of end-to-end tunnel domains;
+// nil rejects mode=tls requests (see SetupTunnelTLS).
+var pfTunnelCertificates tlsgateway.CertificateManager
+
+// SetupTunnelTLS enables mode=tls tunnels with the given certificate source.
+func SetupTunnelTLS(certificates tlsgateway.CertificateManager) {
+	pfTunnelCertificates = certificates
+}
+
+// TunnelCertificateRequest asks about the certificate of an end-to-end tunnel
+// domain, or (Forget) drops it once the domain is removed.
+type TunnelCertificateRequest struct {
+	Hostname string `json:"hostname" validate:"required"`
+	Forget   bool   `json:"forget"`
+}
+
+// TunnelCertificate answers the platform: the state of a domain's
+// certificate, never the certificate itself.
+func TunnelCertificate(ctx context.Context, request TunnelCertificateRequest) (tlsgateway.CertificateStatus, error) {
+	if pfTunnelCertificates == nil {
+		return tlsgateway.CertificateStatus{}, fmt.Errorf("tunnel TLS is not set up on this operator")
+	}
+	hostname := strings.ToLower(strings.TrimSpace(request.Hostname))
+	if request.Forget {
+		return tlsgateway.CertificateStatus{}, pfTunnelCertificates.Forget(ctx, hostname)
+	}
+	return pfTunnelCertificates.Status(hostname), nil
+}
+
 // pfSSHGatewayEnabled gates the pfKindSSH path. An SSH session grants an
 // interactive shell, read/write access to the container filesystem and port
 // forwarding inside the pod, so a cluster must be able to switch it off.
@@ -112,6 +149,12 @@ type PortForwardConnectionRequest struct {
 	WorkloadName   string              `json:"workloadName" validate:"required"`
 	WsConnection   WsConnectionRequest `json:"wsConnectionRequest" validate:"required"`
 	TargetProtocol string              `json:"targetProtocol"` // "http", "https", or empty for auto-detect
+	// Hostname is the end-to-end tunnel domain of a mode=tls request: the only
+	// server name its TLS gateway answers for.
+	Hostname string `json:"hostname"`
+	// Auth is how a mode=tls tunnel admits visitors: the platform cannot check
+	// a password or a sign-in on traffic it never sees, so the gateway does.
+	Auth tlsgateway.AuthConfig `json:"auth"`
 
 	// IsAdmin is the platform's judgement that the requester is an
 	// organization admin, and IsClusterAdmin that an API key carries a
@@ -140,6 +183,11 @@ func (r PortForwardConnectionRequest) isSSH() bool {
 	return strings.ToLower(r.Mode) == pfModeSSH || strings.ToLower(r.Kind) == pfKindSSH
 }
 
+// isTLS reports whether the request serves an end-to-end tunnel domain.
+func (r PortForwardConnectionRequest) isTLS() bool {
+	return strings.ToLower(r.Mode) == pfModeTLS
+}
+
 // validate applies the per-request requirements the struct tags cannot
 // express: what is required depends on where the tunnel ends up.
 func (r PortForwardConnectionRequest) validate() error {
@@ -150,6 +198,9 @@ func (r PortForwardConnectionRequest) validate() error {
 			return fmt.Errorf("namespace is required for mode %q", r.Mode)
 		}
 		return nil
+	}
+	if r.isTLS() && strings.TrimSpace(r.Hostname) == "" {
+		return fmt.Errorf("hostname is required for mode %q", r.Mode)
 	}
 
 	if strings.TrimSpace(r.Kind) == "" {
@@ -203,6 +254,20 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 
 	isHost := strings.ToLower(request.Kind) == pfKindHost
 	isSSH := request.isSSH()
+	isTLS := request.isTLS()
+	if isTLS && pfTunnelCertificates == nil {
+		logger.Error("Rejected end-to-end tunnel request: tunnel TLS is not set up on this operator",
+			"hostname", request.Hostname)
+		return
+	}
+	var tlsAuth *tlsgateway.Authenticator
+	if isTLS {
+		var err error
+		if tlsAuth, err = tlsgateway.NewAuthenticator(request.Auth); err != nil {
+			logger.Error("Rejected end-to-end tunnel request: its access cannot be checked", "hostname", request.Hostname, "error", err)
+			return
+		}
+	}
 
 	// Step 1: Resolve target. Kubernetes kinds resolve to a pod; host targets
 	// are dialed directly and skip pod resolution + the kube-apiserver forward.
@@ -363,6 +428,25 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 		go forwarder.run(done)
 	}
 
+	// dialTarget opens one connection to the target, as a PFM:O does.
+	dialTarget := func() (net.Conn, error) {
+		if forwarder != nil {
+			return forwarder.dial(done, 5*time.Second)
+		}
+		return net.DialTimeout("tcp", dialAddr, 5*time.Second)
+	}
+
+	// An end-to-end tunnel proxies every request of every sub-connection
+	// through one reverse proxy, so upstream connections are reused.
+	var tlsProxy http.Handler
+	if isTLS {
+		tlsProxy = tlsAuth.Wrap(tlsgateway.NewProxy(
+			func(context.Context) (net.Conn, error) { return dialTarget() },
+			needsTLS(request.RemotePort, request.TargetProtocol),
+			logger,
+		))
+	}
+
 	// Connection map: connID → local TCP connection to k8s port-forward
 	conns := make(map[string]net.Conn)
 	connsMu := &sync.RWMutex{}
@@ -481,6 +565,27 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 				connID := after
 				logger.Info("Opening sub-connection", "connID", connID)
 
+				// End-to-end tunnels: the edge appends the browser's address
+				// ("PFM:O:<connID>:<ip>"); the sub-connection carries its TLS,
+				// which the in-process gateway ends.
+				if isTLS {
+					var clientIP string
+					connID, clientIP = splitOpenFrame(after)
+					tunnelEnd, gatewayEnd := net.Pipe()
+					connsMu.Lock()
+					conns[connID] = tunnelEnd
+					connsMu.Unlock()
+					go tlsgateway.Serve(gatewayEnd, tlsgateway.Options{
+						Hostname:     request.Hostname,
+						ClientIP:     clientIP,
+						Certificates: pfTunnelCertificates,
+						Proxy:        tlsProxy,
+						Logger:       logger,
+					})
+					go readLocalAndSend(connID, tunnelEnd)
+					continue
+				}
+
 				// SSH targets are served in-process: one pipe end joins the
 				// tunnel like any TCP sub-connection, the other end speaks
 				// SSH with the embedded gateway server.
@@ -512,13 +617,7 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 					continue
 				}
 
-				var localConn net.Conn
-				var err error
-				if forwarder != nil {
-					localConn, err = forwarder.dial(done, 5*time.Second)
-				} else {
-					localConn, err = net.DialTimeout("tcp", dialAddr, 5*time.Second)
-				}
+				localConn, err := dialTarget()
 				if err != nil {
 					logger.Error("Failed to dial target", "connID", connID, "target", request.WorkloadName, "error", err)
 					_ = wsSendText(pfmErrorPrefix + connID + ":" + pfDialErrorReason(err))
@@ -584,6 +683,17 @@ func PortForwardStreamConnection(request PortForwardConnectionRequest) {
 		forwarder.close()
 	}
 	logger.Info("Port-forward tunnel closed", "target", request.WorkloadName, "port", request.RemotePort)
+}
+
+// splitOpenFrame splits the payload of an end-to-end tunnel's PFM:O into the
+// sub-connection's ID and the browser's address. Only the edge sends the
+// address, and only on mode=tls tunnels, whose connection IDs carry no colon.
+func splitOpenFrame(payload string) (connID, clientIP string) {
+	connID, clientIP, _ = strings.Cut(payload, ":")
+	if net.ParseIP(clientIP) == nil {
+		clientIP = ""
+	}
+	return connID, clientIP
 }
 
 // resolveSSHTarget resolves an SSH request's target to a running pod.
