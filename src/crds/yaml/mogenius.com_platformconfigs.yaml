@@ -676,9 +676,8 @@ spec:
                 description: PlatformSource records where this spec came from
                 type: string
               platformVersion:
-                description: |-
-                  PlatformVersion is an informational tag surfaced in the Version printcolumn;
-                  the operator does not branch on it.
+                description: PlatformVersion is the version of the base platform config
+                  that this is derived from
                 type: string
               renovateOperator:
                 description: |-

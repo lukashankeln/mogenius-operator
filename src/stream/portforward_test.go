@@ -60,6 +60,21 @@ func TestPortForwardConnectionRequestValidate(t *testing.T) {
 			request: PortForwardConnectionRequest{Kind: "SSH", Namespace: "prod", WorkloadName: "api"},
 		},
 		{
+			name:    "tls needs the tunnel's domain",
+			request: PortForwardConnectionRequest{Mode: "tls", Kind: "service", Namespace: "prod", WorkloadName: "web", RemotePort: 80},
+			wantErr: true,
+		},
+		{
+			name: "tls with a domain is valid",
+			request: PortForwardConnectionRequest{Mode: "tls", Hostname: "app.example.com", Kind: "service", Namespace: "prod",
+				WorkloadName: "web", RemotePort: 80},
+		},
+		{
+			name:    "tls still needs a port",
+			request: PortForwardConnectionRequest{Mode: "tls", Hostname: "app.example.com", Kind: "service", Namespace: "prod", WorkloadName: "web"},
+			wantErr: true,
+		},
+		{
 			name:    "whitespace is not a namespace",
 			request: PortForwardConnectionRequest{Kind: "pod", Namespace: "   ", WorkloadName: "api", RemotePort: 80},
 			wantErr: true,
@@ -76,5 +91,24 @@ func TestPortForwardConnectionRequestValidate(t *testing.T) {
 				t.Fatalf("expected the request to be accepted, got: %v", err)
 			}
 		})
+	}
+}
+
+// The edge appends the browser's address to an end-to-end tunnel's PFM:O.
+func TestSplitOpenFrame(t *testing.T) {
+	tests := []struct {
+		payload, connID, clientIP string
+	}{
+		{"e12", "e12", ""},
+		{"e12:203.0.113.7", "e12", "203.0.113.7"},
+		{"e12:2001:db8::1", "e12", "2001:db8::1"},
+		{"e12:not-an-ip", "e12", ""},
+		{"e12:", "e12", ""},
+	}
+	for _, tc := range tests {
+		connID, clientIP := splitOpenFrame(tc.payload)
+		if connID != tc.connID || clientIP != tc.clientIP {
+			t.Errorf("splitOpenFrame(%q) = %q, %q; want %q, %q", tc.payload, connID, clientIP, tc.connID, tc.clientIP)
+		}
 	}
 }

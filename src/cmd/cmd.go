@@ -273,6 +273,31 @@ func LoadConfigDeclarations(configModule *config.Config) {
 		Type:         new(config.ConfigVariableTypeBool),
 	})
 	configModule.Declare(config.ConfigDeclaration{
+		Key:          "MO_TUNNEL_TLS_ACME_SERVER",
+		DefaultValue: new("https://acme-v02.api.letsencrypt.org/directory"),
+		Description:  new("ACME directory the operator requests the certificates of end-to-end tunnel domains from. Let's Encrypt by default; its staging directory or a Pebble test server for tests."),
+		Envs:         []string{"TUNNEL_TLS_ACME_SERVER"},
+	})
+	configModule.Declare(config.ConfigDeclaration{
+		Key:          "MO_TUNNEL_TLS_ACME_EMAIL",
+		DefaultValue: new(""),
+		Description:  new("Contact address of the cluster's ACME account (expiry notices), optional."),
+		Envs:         []string{"TUNNEL_TLS_ACME_EMAIL"},
+	})
+	configModule.Declare(config.ConfigDeclaration{
+		Key:          "MO_TUNNEL_TLS_ACME_CA_FILE",
+		DefaultValue: new(""),
+		Description:  new("PEM file of a CA the ACME server's own TLS certificate is checked against, for test servers like Pebble; optional."),
+		Envs:         []string{"TUNNEL_TLS_ACME_CA_FILE"},
+	})
+	configModule.Declare(config.ConfigDeclaration{
+		Key:          "MO_TUNNEL_TLS_SELF_SIGNED",
+		DefaultValue: new("false"),
+		Description:  new("Serve end-to-end tunnel domains (mode=tls port-forwards) with self-signed certificates made in memory. For development and tests only: browsers warn about them."),
+		Envs:         []string{"TUNNEL_TLS_SELF_SIGNED"},
+		Type:         new(config.ConfigVariableTypeBool),
+	})
+	configModule.Declare(config.ConfigDeclaration{
 		Key:          "MO_SSH_GATEWAY_ALLOW_ADMIN_BYPASS",
 		DefaultValue: new("true"),
 		Description:  new("Let sessions the platform marks as organization- or cluster-admin run under the operator's own identity instead of impersonating the user. That marking arrives over the operator's authenticated control connection, so it is only as strong as that connection. Set to false to require an impersonated identity for every session, with no exception."),
