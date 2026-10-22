@@ -281,14 +281,20 @@ func agentTaskKeyForNamespace(key, namespace string) string {
 // visible to a workspace holding the given namespaces. A finding belongs to
 // its target resource's namespace — a workspace only sees findings about its
 // own namespaces, never manifests of foreign ones. Tasks without a finding
-// (all-clear reports, queued/running/failed runs) and findings on
-// cluster-scoped targets are visible wherever the agent's scope overlaps the
-// workspace; a wildcard scope is visible everywhere. Legacy tasks that
-// predate ScopeNamespaces fall back to the storage key's namespace segment
-// (the old behavior).
+// (all-clear reports, queued/running/failed runs) are visible wherever the
+// agent's scope overlaps the workspace. Legacy tasks that predate
+// ScopeNamespaces fall back to the storage key's namespace segment (the old
+// behavior).
+//
+// A cluster-scoped (wildcard) agent is deliberately NOT visible in any
+// workspace: the agent itself is filtered out of a workspace's agent list
+// (GetAllAgents only returns agents whose scope.workspaceRef matches), so a
+// workspace user cannot open the agent or its run. Surfacing its runs and
+// tool approvals in the workspace anyway stranded the user on an "Agent not
+// found" page (MOG-4854). Cluster-wide runs stay in the cluster view only.
 func agentTaskVisibleInNamespaces(task *AiTask, namespaces map[string]bool) bool {
 	if task.ScopeAllNamespaces {
-		return true
+		return false
 	}
 	if len(task.ScopeNamespaces) > 0 {
 		for _, ns := range task.ScopeNamespaces {
