@@ -249,3 +249,65 @@ func TestGitOpsEngineIsNeverUninstalled(t *testing.T) {
 		})
 	}
 }
+
+// A component's Argo ignore-differences must reach the artifact even when Argo
+// is only detected (no explicit spec.gitOps.argocd), which is the common
+// user-managed case. Before MOG-4827's follow-up the ignore was attached only
+// when getSpecificGitOpsConfig returned a non-nil argoConfig, so a detected
+// engine dropped it and the Application selfHealed forever (MOG-4819).
+func TestResolveComponentGitOpsConfigAttachesIgnoreDifferences(t *testing.T) {
+	ignore := []any{
+		map[string]any{
+			"group":        "extensions.agents.x-k8s.io",
+			"kind":         "SandboxTemplate",
+			"jsonPointers": []any{"/metadata/labels/agents.x-k8s.io~1sandbox-template-ref-hash"},
+		},
+	}
+
+	t.Run("detected argo (no argocd block) still carries the ignore", func(t *testing.T) {
+		// Repositories present but neither engine block declared: the dev-cluster shape.
+		gitOps := &v1alpha1.GitOpsConfig{
+			Repositories: []v1alpha1.GitOpsRepositoryConfig{{Name: "platform", URL: "https://example.com/repo.git"}},
+		}
+		argoConfig, fluxConfig := resolveComponentGitOpsConfig(gitOps, ignore)
+		assert.Nil(t, fluxConfig)
+		if assert.NotNil(t, argoConfig, "detected Argo must still receive the ignore") {
+			assert.Equal(t, ignore, argoConfig.IgnoreDifferences)
+			assert.Empty(t, argoConfig.Project, "project stays empty so getArgoProject keeps the default")
+		}
+	})
+
+	t.Run("nil gitOps still carries the ignore", func(t *testing.T) {
+		argoConfig, fluxConfig := resolveComponentGitOpsConfig(nil, ignore)
+		assert.Nil(t, fluxConfig)
+		if assert.NotNil(t, argoConfig) {
+			assert.Equal(t, ignore, argoConfig.IgnoreDifferences)
+		}
+	})
+
+	t.Run("explicit argo block keeps its project and gets the ignore", func(t *testing.T) {
+		gitOps := &v1alpha1.GitOpsConfig{ArgoCD: &v1alpha1.ArgoCDInstallConfig{Enabled: true}}
+		argoConfig, fluxConfig := resolveComponentGitOpsConfig(gitOps, ignore)
+		assert.Nil(t, fluxConfig)
+		if assert.NotNil(t, argoConfig) {
+			assert.Equal(t, ignore, argoConfig.IgnoreDifferences)
+			assert.NotEmpty(t, argoConfig.Project, "an explicit argo block still sets the project")
+		}
+	})
+
+	t.Run("explicit flux block does not synthesize an argo config", func(t *testing.T) {
+		gitOps := &v1alpha1.GitOpsConfig{FluxCD: &v1alpha1.FluxCDInstallConfig{Enabled: true}}
+		argoConfig, fluxConfig := resolveComponentGitOpsConfig(gitOps, ignore)
+		assert.Nil(t, argoConfig, "Flux delivery must not get a stray Argo config")
+		assert.NotNil(t, fluxConfig)
+	})
+
+	t.Run("no ignore leaves a detected engine untouched", func(t *testing.T) {
+		gitOps := &v1alpha1.GitOpsConfig{
+			Repositories: []v1alpha1.GitOpsRepositoryConfig{{Name: "platform", URL: "https://example.com/repo.git"}},
+		}
+		argoConfig, fluxConfig := resolveComponentGitOpsConfig(gitOps, nil)
+		assert.Nil(t, argoConfig)
+		assert.Nil(t, fluxConfig)
+	})
+}
