@@ -133,10 +133,7 @@ func (d *reconcilerModule) buildComponentArtifact(
 	}
 	extraObjects = append(extraObjects, extraPatchObjects...)
 
-	argoConfig, fluxConfig := getSpecificGitOpsConfig(platformSpec.GitOps)
-	if argoConfig != nil && len(cs.argoIgnoreDifferences) > 0 {
-		argoConfig.IgnoreDifferences = cs.argoIgnoreDifferences
-	}
+	argoConfig, fluxConfig := resolveComponentGitOpsConfig(platformSpec.GitOps, cs.argoIgnoreDifferences)
 
 	return gitops.GitOpsArtifact{
 		Namespace:    helmNamespace(cs.chart, cs.defaultNamespace),
@@ -164,4 +161,29 @@ func getSpecificGitOpsConfig(settings *v1alpha1.GitOpsConfig) (*gitops.ArgoCDSet
 	}
 
 	return nil, nil
+}
+
+// resolveComponentGitOpsConfig picks a component's Argo/Flux settings and
+// carries its Argo ignore-differences onto the Argo settings.
+//
+// The ignore is intrinsic to the component — a controller writing back a field
+// Argo never sends (the agent-sandbox controller stamping a ref-hash label on
+// its SandboxTemplate), which otherwise sits Healthy/OutOfSync and selfHeals
+// forever (MOG-4827). getSpecificGitOpsConfig only returns an argoConfig when
+// spec.gitOps.argocd is explicitly declared, but Argo is just as often only
+// detected (user-managed), leaving argoConfig nil and the ignore silently
+// dropped — so the Application still selfHeals and its PlatformConfig component
+// never reports ready (MOG-4819). Attach the ignore whenever Argo is not ruled
+// out by an explicit Flux block; buildArgoApplication (the only consumer, run
+// solely for Argo delivery) emits it. The synthesized settings leave Project
+// empty so getArgoProject keeps its "default" fallback unchanged.
+func resolveComponentGitOpsConfig(settings *v1alpha1.GitOpsConfig, argoIgnoreDifferences []any) (*gitops.ArgoCDSettings, *gitops.FluxCDSettings) {
+	argoConfig, fluxConfig := getSpecificGitOpsConfig(settings)
+	if len(argoIgnoreDifferences) > 0 && fluxConfig == nil {
+		if argoConfig == nil {
+			argoConfig = &gitops.ArgoCDSettings{}
+		}
+		argoConfig.IgnoreDifferences = argoIgnoreDifferences
+	}
+	return argoConfig, fluxConfig
 }
