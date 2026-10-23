@@ -623,7 +623,9 @@ func HelmRepoAdd(data HelmRepoAddRequest) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("failed to create new chart repository: %s", err)
 	}
-	if _, err := chartRepo.DownloadIndexFile(); err != nil {
+	_, err = chartRepo.DownloadIndexFile()
+	invalidateRepoIndexSummary(entry.Name)
+	if err != nil {
 		return "", fmt.Errorf("failed to download index file: %s", err)
 	}
 
@@ -666,7 +668,9 @@ func HelmRepoPatch(data HelmRepoPatchRequest) (string, error) {
 			if err != nil {
 				return "", err
 			}
-			if _, err := chartRepo.DownloadIndexFile(); err != nil {
+			_, err = chartRepo.DownloadIndexFile()
+			invalidateRepoIndexSummary(re.Name)
+			if err != nil {
 				return "", err
 			}
 			found = true
@@ -707,7 +711,9 @@ func HelmRepoUpdate() ([]HelmEntryStatus, error) {
 			results = append(results, HelmEntryStatus{Entry: parseHelmEntry(re), Status: "error", Message: fmt.Sprintf("failed to create new chart repository: %s", err.Error())})
 			continue
 		}
-		if _, err := chartRepo.DownloadIndexFile(); err != nil {
+		_, err = chartRepo.DownloadIndexFile()
+		invalidateRepoIndexSummary(re.Name)
+		if err != nil {
 			results = append(results, HelmEntryStatus{Entry: parseHelmEntry(re), Status: "error", Message: fmt.Sprintf("failed to download index file: %s", err.Error())})
 			continue
 		}
@@ -750,7 +756,9 @@ func helmRepoUpdateForChart(chartRef string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create chart repository %q: %w", repoName, err)
 	}
-	if _, err := chartRepo.DownloadIndexFile(); err != nil {
+	_, err = chartRepo.DownloadIndexFile()
+	invalidateRepoIndexSummary(repoName)
+	if err != nil {
 		return fmt.Errorf("failed to download index for %q: %w", repoName, err)
 	}
 	return nil
@@ -795,6 +803,7 @@ func HelmRepoRemove(data HelmRepoRemoveRequest) (string, error) {
 
 	// Remove the repository entry
 	repoFile.Remove(data.Name)
+	invalidateRepoIndexSummary(data.Name)
 
 	// Write the updated repository file
 	if err := repoFile.WriteFile(file, 0644); err != nil {
@@ -817,28 +826,21 @@ func HelmChartSearch(data HelmChartSearchRequest) ([]HelmChartInfo, error) {
 	}
 
 	var allCharts []HelmChartInfo
+	livePaths := make(map[string]struct{}, len(repositoriesFile.Repositories))
 
 	for _, repoEntry := range repositoriesFile.Repositories {
 		cacheIndexFile := filepath.Join(settings.RepositoryCache, fmt.Sprintf("%s-index.yaml", repoEntry.Name))
+		livePaths[cacheIndexFile] = struct{}{}
 
-		indexFile, err := repo.LoadIndexFile(cacheIndexFile)
+		summary, err := loadRepoIndexSummary(repoEntry.Name, cacheIndexFile)
 		if err != nil {
 			helmLogger.Debug("failed to load repo index file", "repoName", repoEntry.Name, "error", err.Error())
 			continue
 		}
 
-		for _, chartVersions := range indexFile.Entries {
-			for _, chartVersion := range chartVersions {
-				allCharts = append(allCharts, HelmChartInfo{
-					Name:        fmt.Sprintf("%s/%s", repoEntry.Name, chartVersion.Name),
-					Version:     chartVersion.Version,
-					AppVersion:  chartVersion.AppVersion,
-					Description: chartVersion.Description,
-				})
-				break // only take the first version
-			}
-		}
+		allCharts = append(allCharts, summary.latest...)
 	}
+	pruneRepoIndexSummaries(livePaths)
 
 	filteredCharts := filterCharts(allCharts, data.Name)
 	return filteredCharts, nil
@@ -927,28 +929,14 @@ func HelmChartVersion(data HelmChartVersionRequest) ([]HelmChartInfo, error) {
 		}
 		cacheIndexFile := filepath.Join(settings.RepositoryCache, fmt.Sprintf("%s-index.yaml", repoEntry.Name))
 
-		indexFile, err := repo.LoadIndexFile(cacheIndexFile)
+		summary, err := loadRepoIndexSummary(repoEntry.Name, cacheIndexFile)
 		if err != nil {
 			helmLogger.Debug("Error loading repo index file", "repoName", repoEntry.Name, "error", err.Error())
 			continue
 		}
 
-		for _, chartVersions := range indexFile.Entries {
-			for _, chartVersion := range chartVersions {
-				if chartVersion.Name != chartName {
-					continue
-				}
-				if len(allCharts) > MAXCHART_VERSIONS {
-					break
-				}
-				allCharts = append(allCharts, HelmChartInfo{
-					Name:        fmt.Sprintf("%s/%s", repoEntry.Name, chartVersion.Name),
-					Version:     chartVersion.Version,
-					AppVersion:  chartVersion.AppVersion,
-					Description: chartVersion.Description,
-				})
-			}
-		}
+		// copy: the cached summary is shared and must not be mutated by callers
+		allCharts = append(allCharts, summary.versions[chartName]...)
 	}
 	return allCharts, nil
 }
@@ -1008,8 +996,8 @@ func HelmOciInstall(data HelmChartOciInstallUpgradeRequest) (result string, err 
 	// See HelmReleaseUpgrade: take sole ownership on SSA conflicts (MOG-4393).
 	install.ForceConflicts = true
 	install.Labels = map[string]string{
-		InstalledViaLabel: InstalledViaValue,
-		"mogenius.com/oci-chart":     "true",
+		InstalledViaLabel:        InstalledViaValue,
+		"mogenius.com/oci-chart": "true",
 	}
 
 	// Create registry client for OCI
@@ -1177,8 +1165,8 @@ func HelmChartInstall(data HelmChartInstallUpgradeRequest) (result string, err e
 	// See HelmReleaseUpgrade: take sole ownership on SSA conflicts (MOG-4393).
 	install.ForceConflicts = true
 	install.Labels = map[string]string{
-		InstalledViaLabel: InstalledViaValue,
-		"mogenius.com/oci-chart":     "false",
+		InstalledViaLabel:        InstalledViaValue,
+		"mogenius.com/oci-chart": "false",
 	}
 
 	helmLogger.Info("Locating chart ...", "releaseName", data.Release, "namespace", data.Namespace)
