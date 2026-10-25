@@ -67,3 +67,9 @@ func TestFetchCountryTimeout(t *testing.T) {
 	assert.Nil(t, country)
 	assert.Less(t, elapsed, 2*time.Second)
 }
+
+// GuessClusterCountry runs under the cluster/resource-info TTLCache mutex,
+// so the production client must never be unbounded.
+func TestCountryLookupClientHasTimeout(t *testing.T) {
+	assert.Equal(t, 10*time.Second, countryLookupClient.Timeout)
+}
