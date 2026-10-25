@@ -27,6 +27,12 @@ import (
 
 var CURRENT_COUNTRY *CountryDetails
 
+const countryLookupURL = "https://platform-api.mogenius.com/country/location"
+
+// The timeout matters: GuessClusterCountry is called from a TTLCache fill func
+// that holds the cache mutex, so a hung server would otherwise block it forever.
+var countryLookupClient = &http.Client{Timeout: 10 * time.Second}
+
 var config cfg.ConfigModule
 var utilsLogger *slog.Logger
 var validate = validator.New(validator.WithRequiredStructEnabled())
@@ -219,6 +225,28 @@ func MergeMaps(maplist ...map[string]string) map[string]string {
 	return resultMap
 }
 
+func fetchCountry(client *http.Client, url string) (*CountryDetails, error) {
+	resp, err := client.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("failed to fetch with status code: %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var country CountryDetails
+	if err := json.Unmarshal(body, &country); err != nil {
+		return nil, err
+	}
+	return &country, nil
+}
+
 func GuessClusterCountry() (*CountryDetails, error) {
 	if CURRENT_COUNTRY != nil {
 		return CURRENT_COUNTRY, nil
@@ -227,27 +255,12 @@ func GuessClusterCountry() (*CountryDetails, error) {
 	allowCountryCheck, err := config.TryGetBool("MO_ALLOW_COUNTRY_CHECK")
 	assert.Assert(err == nil, err)
 	if allowCountryCheck {
-		resp, err := http.Get("https://platform-api.mogenius.com/country/location")
+		country, err := fetchCountry(countryLookupClient, countryLookupURL)
 		if err != nil {
 			return nil, err
 		}
-		defer func() { _ = resp.Body.Close() }()
-
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("failed to fetch with status code: %d", resp.StatusCode)
-		}
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return nil, err
-		}
-
-		var country CountryDetails
-		if err := json.Unmarshal(body, &country); err != nil {
-			return CURRENT_COUNTRY, err
-		} else {
-			CURRENT_COUNTRY = &country
-			return CURRENT_COUNTRY, err
-		}
+		CURRENT_COUNTRY = country
+		return CURRENT_COUNTRY, nil
 	}
 	return nil, nil
 }
