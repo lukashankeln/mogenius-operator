@@ -119,13 +119,13 @@ func (self *cpuMonitor) startCollector() {
 		defer processMetricsUpdater.Stop()
 
 		lastProcStatCpu := ProcStatCpu{}
-		lastProcStatCpu, metrics := self.updateMetrics(statPath, lastProcStatCpu)
+		lastProcStatCpu, metrics := self.updateMetrics(statPath, lastProcStatCpu, CpuMetrics{})
 		processMetrics := self.collectProcessMetrics()
 
 		for {
 			select {
 			case <-globalMetricsUpdater.C:
-				lastProcStatCpu, metrics = self.updateMetrics(statPath, lastProcStatCpu)
+				lastProcStatCpu, metrics = self.updateMetrics(statPath, lastProcStatCpu, metrics)
 			case <-processMetricsUpdater.C:
 				processMetrics = self.collectProcessMetrics()
 			case <-self.cpuUsageGlobalTx:
@@ -178,12 +178,16 @@ type ProcStatCpu struct {
 	GuestNice uint64 `json:"guest_nice"`
 }
 
-func (self *cpuMonitor) updateMetrics(statPath string, lastProcStatCpu ProcStatCpu) (ProcStatCpu, CpuMetrics) {
+func (self *cpuMonitor) updateMetrics(statPath string, lastProcStatCpu ProcStatCpu, lastMetrics CpuMetrics) (ProcStatCpu, CpuMetrics) {
 	procStatCpu, err := self.readGlobalCpuMetrics(statPath)
 	if err != nil {
-		self.logger.Warn("failed to read initial cpu metrics", "sourcepath", statPath, "error", err)
+		self.logger.Warn("failed to read cpu metrics", "sourcepath", statPath, "error", err)
+		return lastProcStatCpu, lastMetrics
 	}
-	metrics := self.calculateGlobalMetrics(lastProcStatCpu, procStatCpu)
+	metrics, ok := self.calculateGlobalMetrics(lastProcStatCpu, procStatCpu)
+	if !ok {
+		return procStatCpu, lastMetrics
+	}
 
 	return procStatCpu, metrics
 }
@@ -225,20 +229,32 @@ func (self *cpuMonitor) readGlobalCpuMetrics(statPath string) (ProcStatCpu, erro
 	return data, nil
 }
 
-func (self *cpuMonitor) calculateGlobalMetrics(lastProcStatCpu ProcStatCpu, procStatCpu ProcStatCpu) CpuMetrics {
+// counterDelta returns current-last, or 0 if the counter went backwards
+// (e.g. iowait may decrease), avoiding uint64 underflow.
+func counterDelta(current, last uint64) float64 {
+	if current < last {
+		return 0
+	}
+	return float64(current - last)
+}
+
+func (self *cpuMonitor) calculateGlobalMetrics(lastProcStatCpu ProcStatCpu, procStatCpu ProcStatCpu) (CpuMetrics, bool) {
 	// Calculate deltas
-	userDelta := float64(procStatCpu.User - lastProcStatCpu.User)
-	niceDelta := float64(procStatCpu.Nice - lastProcStatCpu.Nice)
-	systemDelta := float64(procStatCpu.System - lastProcStatCpu.System)
-	idleDelta := float64(procStatCpu.Idle - lastProcStatCpu.Idle)
-	iowaitDelta := float64(procStatCpu.Iowait - lastProcStatCpu.Iowait)
-	irqDelta := float64(procStatCpu.Irq - lastProcStatCpu.Irq)
-	softirqDelta := float64(procStatCpu.Softirq - lastProcStatCpu.Softirq)
-	stealDelta := float64(procStatCpu.Steal - lastProcStatCpu.Steal)
+	userDelta := counterDelta(procStatCpu.User, lastProcStatCpu.User)
+	niceDelta := counterDelta(procStatCpu.Nice, lastProcStatCpu.Nice)
+	systemDelta := counterDelta(procStatCpu.System, lastProcStatCpu.System)
+	idleDelta := counterDelta(procStatCpu.Idle, lastProcStatCpu.Idle)
+	iowaitDelta := counterDelta(procStatCpu.Iowait, lastProcStatCpu.Iowait)
+	irqDelta := counterDelta(procStatCpu.Irq, lastProcStatCpu.Irq)
+	softirqDelta := counterDelta(procStatCpu.Softirq, lastProcStatCpu.Softirq)
+	stealDelta := counterDelta(procStatCpu.Steal, lastProcStatCpu.Steal)
 
 	// Total time delta
 	totalDelta := userDelta + niceDelta + systemDelta + idleDelta +
 		iowaitDelta + irqDelta + softirqDelta + stealDelta
+	if totalDelta == 0 {
+		return CpuMetrics{}, false
+	}
 
 	// Calculate percentages
 	data := CpuMetrics{}
@@ -246,7 +262,7 @@ func (self *cpuMonitor) calculateGlobalMetrics(lastProcStatCpu ProcStatCpu, proc
 	data.System = ((systemDelta + irqDelta + softirqDelta) / totalDelta) * 100 // system + irq + softirq
 	data.Idle = ((idleDelta + iowaitDelta) / totalDelta) * 100                 // idle + iowait
 
-	return data
+	return data, true
 }
 
 type CpuMetrics struct {

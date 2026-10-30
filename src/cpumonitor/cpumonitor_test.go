@@ -1,6 +1,9 @@
 package cpumonitor
 
 import (
+	"encoding/json"
+	"log/slog"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -85,4 +88,96 @@ func TestGetCpuUsageInfo(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func assertSaneMetrics(t *testing.T, m CpuMetrics) {
+	t.Helper()
+	for _, v := range []float64{m.User, m.System, m.Idle} {
+		assert.False(t, math.IsNaN(v))
+		assert.False(t, math.IsInf(v, 0))
+		assert.GreaterOrEqual(t, v, 0.0)
+		assert.LessOrEqual(t, v, 100.0)
+	}
+	_, err := json.Marshal(m)
+	assert.NoError(t, err)
+}
+
+func TestCalculateGlobalMetrics(t *testing.T) {
+	m := &cpuMonitor{}
+	last := ProcStatCpu{User: 100, Nice: 10, System: 50, Idle: 800, Iowait: 40, Irq: 5, Softirq: 5, Steal: 0}
+
+	tests := []struct {
+		name    string
+		last    ProcStatCpu
+		current ProcStatCpu
+		wantOk  bool
+		want    CpuMetrics
+	}{
+		{
+			name:    "normal advance",
+			last:    last,
+			current: ProcStatCpu{User: 120, Nice: 10, System: 60, Idle: 850, Iowait: 50, Irq: 5, Softirq: 5, Steal: 0},
+			wantOk:  true,
+			want:    CpuMetrics{User: 200.0 / 9, System: 100.0 / 9, Idle: 600.0 / 9},
+		},
+		{
+			name:    "zero delta",
+			last:    last,
+			current: last,
+			wantOk:  false,
+		},
+		{
+			name:    "iowait decreases",
+			last:    last,
+			current: ProcStatCpu{User: 120, Nice: 10, System: 60, Idle: 870, Iowait: 30, Irq: 5, Softirq: 5, Steal: 0},
+			wantOk:  true,
+			want:    CpuMetrics{User: 20, System: 10, Idle: 70},
+		},
+		{
+			name:    "all counters below last",
+			last:    last,
+			current: ProcStatCpu{},
+			wantOk:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := m.calculateGlobalMetrics(tt.last, tt.current)
+			assert.Equal(t, tt.wantOk, ok)
+			assertSaneMetrics(t, got)
+			if tt.wantOk {
+				assert.InDelta(t, tt.want.User, got.User, 1e-9)
+				assert.InDelta(t, tt.want.System, got.System, 1e-9)
+				assert.InDelta(t, tt.want.Idle, got.Idle, 1e-9)
+			} else {
+				assert.Equal(t, CpuMetrics{}, got)
+			}
+		})
+	}
+}
+
+func TestUpdateMetricsKeepsBaselineOnReadError(t *testing.T) {
+	m := &cpuMonitor{logger: slog.New(slog.DiscardHandler)}
+	dir := t.TempDir()
+	baseline := ProcStatCpu{User: 100, Idle: 900}
+	prevMetrics := CpuMetrics{User: 12, System: 3, Idle: 85}
+
+	gotStat, gotMetrics := m.updateMetrics(filepath.Join(dir, "missing"), baseline, prevMetrics)
+	assert.Equal(t, baseline, gotStat)
+	assert.Equal(t, prevMetrics, gotMetrics)
+
+	statPath := filepath.Join(dir, "stat")
+	line := "cpu 200 0 100 1000 0 0 0 0 0 0\ncpu0 200 0 100 1000 0 0 0 0 0 0\n"
+	assert.NoError(t, os.WriteFile(statPath, []byte(line), 0o600))
+
+	gotStat, gotMetrics = m.updateMetrics(statPath, baseline, prevMetrics)
+	assert.Equal(t, ProcStatCpu{User: 200, System: 100, Idle: 1000}, gotStat)
+	assertSaneMetrics(t, gotMetrics)
+	assert.InDelta(t, 100.0/3, gotMetrics.User, 1e-9)
+	assert.InDelta(t, 100.0/3, gotMetrics.System, 1e-9)
+	assert.InDelta(t, 100.0/3, gotMetrics.Idle, 1e-9)
+
+	again, keptMetrics := m.updateMetrics(statPath, gotStat, gotMetrics)
+	assert.Equal(t, gotStat, again)
+	assert.Equal(t, gotMetrics, keptMetrics)
 }
